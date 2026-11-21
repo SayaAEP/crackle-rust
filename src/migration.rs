@@ -125,22 +125,8 @@ fn push_relative(path: &Path, prefix: &Path, paths: &mut Vec<ManagedPath>) -> io
 }
 
 fn release_asset(url: &str, destination: &Path) -> io::Result<()> {
-    let status = Command::new("curl")
-        .args([
-            "--fail",
-            "--location",
-            "--silent",
-            "--show-error",
-            url,
-            "--output",
-        ])
-        .arg(destination)
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("download failed: {url}")))
-    }
+    crate::download_file(url, destination)
+        .map_err(|error| io::Error::other(format!("download failed: {url}: {error}")))
 }
 
 fn checksum(path: &Path) -> io::Result<String> {

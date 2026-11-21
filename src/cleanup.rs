@@ -31,7 +31,6 @@ pub(crate) struct Cleanup {
     pub dpkg_state: PathBuf,
     pub state_home: PathBuf,
     pub library_dir: PathBuf,
-    pub completion: Option<PathBuf>,
     pub command_names: &'static [&'static str],
     /// Disabled by unit tests so cleanup never invokes the real `sudo`.
     pub sudo_clean: bool,
@@ -61,12 +60,6 @@ impl Cleanup {
         }
 
         remove_tree(&self.library_dir);
-        if let Some(completion) = &self.completion {
-            remove_tree(completion);
-            if let Some(parent) = completion.parent() {
-                let _ = fs::remove_dir(parent);
-            }
-        }
         self.remove_broken_bin_links();
         self.remove_broken_home_manager_links();
         if self.sudo_clean {
@@ -163,7 +156,6 @@ pub(crate) fn workspace(
     dpkg_state: PathBuf,
     state_home: PathBuf,
     library_dir: PathBuf,
-    completion: Option<PathBuf>,
     command_names: &'static [&'static str],
 ) -> Cleanup {
     Cleanup {
@@ -175,7 +167,6 @@ pub(crate) fn workspace(
         dpkg_state,
         state_home,
         library_dir,
-        completion,
         command_names,
         sudo_clean: true,
     }

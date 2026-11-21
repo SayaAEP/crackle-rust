@@ -322,39 +322,139 @@ fn available(program: &str) -> bool {
     executable_path(program).is_some()
 }
 
-fn executable_path(program: &str) -> Option<PathBuf> {
-    let mut directories: Vec<PathBuf> =
-        env::split_paths(&env::var_os("PATH").unwrap_or_default()).collect();
-    if let Ok(home) = home() {
-        directories.extend([
-            home.join(".local/bin"),
-            home.join(".nix-profile/bin"),
-            PathBuf::from("/nix/var/nix/profiles/default/bin"),
-        ]);
-    }
+/// Search order mirrors legacy `check_path`: Crackle's own bin and the Nix
+/// profile come first, then PATH. This prevents a broken `/snap/bin` tool from
+/// shadowing a working or freshly extracted one.
+fn search_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
     if let Ok(prefix) = prefix() {
         directories.push(prefix.join("bin"));
     }
+    if let Ok(home) = home() {
+        directories.push(home.join(".local/bin"));
+        directories.push(home.join(".nix-profile/bin"));
+        directories.push(PathBuf::from("/nix/var/nix/profiles/default/bin"));
+    }
+    directories.extend(
+        ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            .into_iter()
+            .map(PathBuf::from),
+    );
+    directories.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
     directories
+}
+
+fn executable_path(program: &str) -> Option<PathBuf> {
+    search_directories()
         .into_iter()
         .map(|directory| directory.join(program))
         .find(|path| path.is_file())
 }
 
 fn effective_path() -> OsString {
-    let mut paths: Vec<PathBuf> =
-        env::split_paths(&env::var_os("PATH").unwrap_or_default()).collect();
-    if let Ok(home) = home() {
-        paths.extend([
-            home.join(".local/bin"),
-            home.join(".nix-profile/bin"),
-            PathBuf::from("/nix/var/nix/profiles/default/bin"),
-        ]);
+    env::join_paths(search_directories())
+        .unwrap_or_else(|_| env::var_os("PATH").unwrap_or_default())
+}
+
+fn curl_candidates() -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = search_directories()
+        .into_iter()
+        .map(|directory| directory.join("curl"))
+        .collect();
+    candidates.extend(
+        [
+            "/usr/bin/curl",
+            "/bin/curl",
+            "/usr/local/bin/curl",
+            "/snap/bin/curl",
+        ]
+        .into_iter()
+        .map(PathBuf::from),
+    );
+    candidates
+}
+
+/// Prefer a curl that actually runs. Ubuntu Touch can have a broken Snap curl
+/// shadowing the system one.
+fn working_curl() -> Option<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    for candidate in curl_candidates() {
+        if !seen.insert(candidate.clone()) || !candidate.is_file() {
+            continue;
+        }
+        if Command::new(&candidate)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Some(candidate);
+        }
     }
-    if let Ok(prefix) = prefix() {
-        paths.push(prefix.join("bin"));
+    None
+}
+
+fn curl_available() -> bool {
+    working_curl().is_some()
+}
+
+/// Put the directory of a working curl first so the Nix installer's internal
+/// `curl` lookup cannot pick a broken Snap wrapper.
+fn path_with_working_curl() -> OsString {
+    let mut directories = Vec::new();
+    if let Some(curl) = working_curl()
+        && let Some(parent) = curl.parent()
+    {
+        directories.push(parent.to_path_buf());
     }
-    env::join_paths(paths).unwrap_or_else(|_| env::var_os("PATH").unwrap_or_default())
+    directories.extend(env::split_paths(&effective_path()));
+    env::join_paths(directories).unwrap_or_else(|_| effective_path())
+}
+
+pub(crate) fn curl_command() -> io::Result<Command> {
+    let path = working_curl().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no working curl executable found (tried the prefix, /usr/bin/curl, /bin/curl, /usr/local/bin/curl, and PATH)",
+        )
+    })?;
+    let mut command = Command::new(path);
+    command.env("PATH", effective_path());
+    Ok(command)
+}
+
+/// Download with a working curl, falling back to wget. Used for the Nix
+/// installer, repository configuration, signing keys, and migration assets.
+pub(crate) fn download_file(url: &str, destination: &Path) -> io::Result<()> {
+    if let Ok(mut command) = curl_command() {
+        let status = command
+            .args([
+                "--fail",
+                "--location",
+                "--silent",
+                "--show-error",
+                url,
+                "--output",
+            ])
+            .arg(destination)
+            .status();
+        if status.is_ok_and(|status| status.success()) {
+            return Ok(());
+        }
+    }
+    if available("wget") {
+        let status = command("wget")
+            .args(["-q", "-O"])
+            .arg(destination)
+            .arg(url)
+            .status()?;
+        if status.success() {
+            return Ok(());
+        }
+    }
+    Err(io::Error::other(format!("could not download {url}")))
 }
 
 pub(crate) fn command(program: &str) -> Command {
@@ -923,7 +1023,7 @@ fn setup_environment(layout: InstallLayout) -> io::Result<()> {
                 ));
             }
             let mut missing = Vec::new();
-            if !available("curl") {
+            if !curl_available() {
                 missing.push("curl");
             }
             if !available("xz") {
@@ -1139,7 +1239,7 @@ fn downloaded_debs(archives: &Path) -> io::Result<Vec<PathBuf>> {
 
 fn ensure_curl_xz(apt: &mut AptWorkspace) -> io::Result<()> {
     let mut missing = Vec::new();
-    if !available("curl") {
+    if !curl_available() {
         missing.push("curl");
     }
     if !available("xz") {
@@ -1210,26 +1310,14 @@ fn setup_nix_home_manager() -> io::Result<()> {
     if !available("nix") {
         println!("Installing Nix...");
         let installer = env::temp_dir().join(format!("crackle-nix-install-{}", std::process::id()));
-        let status = run_command(
-            command("curl")
-                .args([
-                    "--proto",
-                    "=https",
-                    "--tlsv1.2",
-                    "--fail",
-                    "--location",
-                    "https://nixos.org/nix/install",
-                    "--output",
-                ])
-                .arg(&installer),
-        )?;
-        if !status.success() {
-            return Err(io::Error::other("failed to download the Nix installer"));
-        }
+        download_file("https://nixos.org/nix/install", &installer).map_err(|error| {
+            io::Error::other(format!("failed to download the Nix installer: {error}"))
+        })?;
         let status = run_command(
             command("sh")
                 .arg(&installer)
-                .args(["--no-daemon", "--no-channel-add"]),
+                .args(["--no-daemon", "--no-channel-add"])
+                .env("PATH", path_with_working_curl()),
         )?;
         let _ = fs::remove_file(installer);
         if !status.success() {
@@ -1292,11 +1380,6 @@ fn cleanup_workspace(layout: InstallLayout) -> io::Result<cleanup::Cleanup> {
         )?,
         xdg_path("XDG_STATE_HOME", ".local/state")?,
         library_dir(layout, &prefix),
-        if layout.is_side_by_side() {
-            None
-        } else {
-            Some(completion_file()?)
-        },
         COMMAND_NAMES,
     ))
 }
@@ -1479,24 +1562,11 @@ fn apt_workspace(layout: InstallLayout) -> io::Result<AptWorkspace> {
 
 fn setup_repositories(apt: &AptWorkspace, layout: InstallLayout) -> io::Result<()> {
     let archive = apt.base.join("cracklebin.tar.gz");
-    let status = run_command(
-        command("curl")
-            .args([
-                "--disable",
-                "--fail",
-                "--location",
-                "--silent",
-                "--show-error",
-                CRACKLE_BIN_ARCHIVE,
-                "--output",
-            ])
-            .arg(&archive),
-    )?;
-    if !status.success() {
-        return Err(io::Error::other(
-            "failed to download Crackle's Apt repository configuration",
-        ));
-    }
+    download_file(CRACKLE_BIN_ARCHIVE, &archive).map_err(|error| {
+        io::Error::other(format!(
+            "failed to download Crackle's Apt repository configuration: {error}"
+        ))
+    })?;
 
     let listing = capture_command(command("tar").args(["-tzf"]).arg(&archive))?;
     if !listing.status.success() {
@@ -1584,23 +1654,11 @@ fn setup_repositories(apt: &AptWorkspace, layout: InstallLayout) -> io::Result<(
         if let Some((_, url, key_name)) = REPOSITORY_KEYS.iter().find(|(repo, _, _)| *repo == name)
         {
             let key = trusted.join(key_name);
-            let status = run_command(
-                command("curl")
-                    .args([
-                        "--fail",
-                        "--location",
-                        "--silent",
-                        "--show-error",
-                        url,
-                        "--output",
-                    ])
-                    .arg(&key),
-            )?;
-            if !status.success() {
-                return Err(io::Error::other(format!(
-                    "failed to download the {name} Apt signing key"
-                )));
-            }
+            download_file(url, &key).map_err(|error| {
+                io::Error::other(format!(
+                    "failed to download the {name} Apt signing key: {error}"
+                ))
+            })?;
         } else {
             // Legacy sourced every downloaded repo script; the Rust port keeps
             // a declarative key table instead of executing fetched code.
