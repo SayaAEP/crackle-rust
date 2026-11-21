@@ -1115,6 +1115,28 @@ fn copy_directory_files(source: &Path, destination: &Path, suffix: &str) -> io::
     Ok(())
 }
 
+/// `.deb` files present in the Apt archive cache. A missing archive directory
+/// is normal when nothing had to be downloaded (for example curl/xz are already
+/// installed); it must not abort setup.
+fn downloaded_debs(archives: &Path) -> io::Result<Vec<PathBuf>> {
+    if !archives.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut debs = Vec::new();
+    for entry in fs::read_dir(archives).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("could not read {}: {error}", archives.display()),
+        )
+    })? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|extension| extension == "deb") {
+            debs.push(path);
+        }
+    }
+    Ok(debs)
+}
+
 fn ensure_curl_xz(apt: &mut AptWorkspace) -> io::Result<()> {
     let mut missing = Vec::new();
     if !available("curl") {
@@ -1143,11 +1165,7 @@ fn ensure_curl_xz(apt: &mut AptWorkspace) -> io::Result<()> {
     let archives = apt.cache.join("archives");
     let package_dir = apt.data.join("packages");
     fs::create_dir_all(&package_dir)?;
-    for entry in fs::read_dir(archives)? {
-        let path = entry?.path();
-        if !path.extension().is_some_and(|extension| extension == "deb") {
-            continue;
-        }
+    for path in downloaded_debs(&archives)? {
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -1659,19 +1677,16 @@ fn crack(args: &[OsString]) -> io::Result<()> {
     let package_name = args[0].to_string_lossy();
     let destination = home()?.join("packages").join(package_name.as_ref());
     fs::create_dir_all(&destination)?;
-    for entry in fs::read_dir(apt.cache.join("archives"))? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|extension| extension == "deb") {
-            println!("extracting {}", path.display());
-            run_os(
-                "dpkg-deb",
-                &[
-                    OsString::from("-x"),
-                    path.into_os_string(),
-                    destination.clone().into_os_string(),
-                ],
-            )?;
-        }
+    for path in downloaded_debs(&apt.cache.join("archives"))? {
+        println!("extracting {}", path.display());
+        run_os(
+            "dpkg-deb",
+            &[
+                OsString::from("-x"),
+                path.into_os_string(),
+                destination.clone().into_os_string(),
+            ],
+        )?;
     }
     println!("Extracted packages to {}.", destination.display());
     cleanup_environment(layout);
@@ -1748,19 +1763,16 @@ fn click(args: &[OsString], bump: bool) -> io::Result<()> {
     if !run_command(&mut download)?.success() {
         return Err(io::Error::other("apt-get download-only install failed"));
     }
-    for entry in fs::read_dir(apt.cache.join("archives"))? {
-        let deb = entry?.path();
-        if deb.extension().is_some_and(|extension| extension == "deb") {
-            println!("extracting {}", deb.display());
-            run_os(
-                "dpkg-deb",
-                &[
-                    OsString::from("-x"),
-                    deb.into_os_string(),
-                    build.clone().into_os_string(),
-                ],
-            )?;
-        }
+    for deb in downloaded_debs(&apt.cache.join("archives"))? {
+        println!("extracting {}", deb.display());
+        run_os(
+            "dpkg-deb",
+            &[
+                OsString::from("-x"),
+                deb.into_os_string(),
+                build.clone().into_os_string(),
+            ],
+        )?;
     }
     prepare_click_manifest(&root, &build, &install, &click_bin, args)?;
     println!("Building package tree...");
