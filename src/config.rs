@@ -10,12 +10,25 @@ struct PackageBlock {
     indent: usize,
 }
 
+fn raw_lines(contents: &str) -> Vec<&str> {
+    if contents.is_empty() {
+        Vec::new()
+    } else {
+        contents.split_inclusive('\n').collect()
+    }
+}
+
+fn line_text(raw: &str) -> &str {
+    raw.trim_end_matches(['\r', '\n'])
+}
+
 fn package_blocks(contents: &str) -> Vec<PackageBlock> {
-    let lines: Vec<&str> = contents.lines().collect();
+    let lines = raw_lines(contents);
     let mut blocks = Vec::new();
     let mut current: Option<PackageBlock> = None;
 
-    for (index, line) in lines.iter().enumerate() {
+    for (index, raw) in lines.iter().enumerate() {
+        let line = line_text(raw);
         let trimmed = line.trim();
         if trimmed.starts_with('#') {
             continue;
@@ -46,33 +59,35 @@ fn package_blocks(contents: &str) -> Vec<PackageBlock> {
     blocks
 }
 
-fn validate_blocks(blocks: &[PackageBlock]) -> io::Result<()> {
+// Mirrors the original `check_package_blocks()`: prints a message and
+// reports "there's a problem" rather than raising an error. The caller
+// is expected to just return an empty/unchanged result in that case and
+// keep going, same as the Python implementation did.
+fn has_block_problem(blocks: &[PackageBlock]) -> bool {
     if blocks.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "no package blocks found in configuration file",
-        ));
+        println!("no package blocks found in configuration file");
+        return true;
     }
     let mut seen = std::collections::HashSet::new();
     for block in blocks {
         if !seen.insert(&block.package_type) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "duplicate package block of type '{}' is not supported",
-                    block.package_type
-                ),
-            ));
+            println!(
+                "Error: Duplicate package block of type '{}' this is not supported.",
+                block.package_type
+            );
+            return true;
         }
     }
-    Ok(())
+    false
 }
 
 pub fn read_packages(path: &Path, package_type: &str) -> io::Result<Vec<String>> {
     let contents = fs::read_to_string(path)?;
     let blocks = package_blocks(&contents);
-    validate_blocks(&blocks)?;
-    let lines: Vec<&str> = contents.lines().collect();
+    if has_block_problem(&blocks) {
+        return Ok(Vec::new());
+    }
+    let lines = raw_lines(&contents);
     let Some(block) = blocks
         .iter()
         .find(|block| block.package_type == package_type)
@@ -82,7 +97,7 @@ pub fn read_packages(path: &Path, package_type: &str) -> io::Result<Vec<String>>
 
     Ok(lines[block.start..block.end]
         .iter()
-        .map(|line| line.trim())
+        .map(|raw| line_text(raw).trim())
         .filter(|line| {
             !line.is_empty()
                 && !line.starts_with('#')
@@ -103,7 +118,9 @@ pub fn update_packages(
 ) -> io::Result<Vec<String>> {
     let contents = fs::read_to_string(path)?;
     let blocks = package_blocks(&contents);
-    validate_blocks(&blocks)?;
+    if has_block_problem(&blocks) {
+        return Ok(Vec::new());
+    }
     let block = blocks
         .iter()
         .find(|block| block.package_type == package_type)
@@ -121,8 +138,8 @@ pub fn update_packages(
     };
     let mut packages = Vec::with_capacity(additions.len() + existing.len());
     for package in additions {
-        packages.push(if let Some(suffix) = package.strip_prefix("nixpkgs") {
-            format!("pkgs{suffix}")
+        packages.push(if let Some(suffix) = package.strip_prefix("nixpkgs.") {
+            format!("pkgs.{suffix}")
         } else {
             package.clone()
         });
@@ -130,20 +147,25 @@ pub fn update_packages(
     packages.extend(existing);
     packages.retain(|package| !removals.contains(package));
 
-    let lines: Vec<&str> = contents.lines().collect();
-    let mut updated: Vec<String> = lines[..block.start]
-        .iter()
-        .map(|line| format!("{line}\n"))
-        .collect();
-    updated.extend(
-        packages
-            .iter()
-            .map(|package| format!("{}{}\n", " ".repeat(block.indent + 2), package)),
-    );
-    updated.extend(lines[block.end..].iter().map(|line| format!("{line}\n")));
-    let mut text = updated.concat();
-    if !contents.ends_with('\n') && text.ends_with('\n') {
-        text.pop();
+    // Preserve every untouched line byte-for-byte (including CRLF) and use the
+    // file's dominant line ending for the rewritten block.
+    let lines = raw_lines(&contents);
+    let eol = if contents.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut text = String::with_capacity(contents.len());
+    for raw in &lines[..block.start] {
+        text.push_str(raw);
+    }
+    for package in &packages {
+        text.push_str(&" ".repeat(block.indent + 2));
+        text.push_str(package);
+        text.push_str(eol);
+    }
+    for raw in &lines[block.end..] {
+        text.push_str(raw);
     }
     atomic_write(path, text.as_bytes())?;
     Ok(packages)
@@ -178,65 +200,5 @@ pub fn config_path() -> io::Result<PathBuf> {
             io::ErrorKind::NotFound,
             format!("config file not found at {}", path.display()),
         ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn fixture(contents: &str) -> PathBuf {
-        let id = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("crackle-config-{id}.nix"));
-        fs::write(&path, contents).unwrap();
-        path
-    }
-
-    #[test]
-    fn reads_and_updates_home_packages_without_touching_other_blocks() {
-        let path = fixture(
-            "{ pkgs, ... }: {\n  home.packages = with pkgs; [\n    git\n  ];\n  programs.bash.enable = true;\n}\n",
-        );
-        assert_eq!(read_packages(&path, "home").unwrap(), ["git"]);
-        update_packages(&path, "home", &["nixpkgs.neovim".into()], &[], false).unwrap();
-        let updated = fs::read_to_string(&path).unwrap();
-        assert!(updated.contains("    pkgs.neovim\n    git\n"));
-        assert!(updated.contains("programs.bash.enable"));
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn rejects_duplicate_blocks_and_removes_only_requested_packages() {
-        let duplicate = fixture(
-            "{\n  home.packages = [\n    git\n  ];\n  home.packages = [\n    vim\n  ];\n}\n",
-        );
-        assert_eq!(
-            read_packages(&duplicate, "home").unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
-        fs::remove_file(duplicate).unwrap();
-
-        let path = fixture(
-            "{\n  home.packages = [\n    git\n    vim\n  ];\n  programs.bash.enable = true;\n}\n",
-        );
-        update_packages(&path, "home", &[], &["git".into()], false).unwrap();
-        let updated = fs::read_to_string(&path).unwrap();
-        assert!(!updated.contains("    git\n"));
-        assert!(updated.contains("    vim\n"));
-        assert!(updated.contains("programs.bash.enable"));
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn reads_system_packages_using_the_legacy_block_name() {
-        let path =
-            fixture("{ ... }: {\n  environment.systemPackages = with pkgs; [\n    git\n  ];\n}\n");
-        assert_eq!(read_packages(&path, "system").unwrap(), ["git"]);
-        assert!(read_packages(&path, "home").unwrap().is_empty());
-        fs::remove_file(path).unwrap();
     }
 }

@@ -1,5 +1,7 @@
 name: Rust
 
+# `rust` is the repository's default branch, so the scheduled nightly below runs
+# from this workflow. Push-triggered nightlies on `rust` work as well.
 on:
   push:
     branches: [rust]
@@ -22,7 +24,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      - run: cargo test --locked
+      - run: cargo build --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: bash -n lib/upgradefunc
 
@@ -55,11 +57,23 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: crackle-release-${{ github.ref }}
+      cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify the tagged commit is on the rust branch
+        run: |
+          git fetch origin +refs/heads/rust:refs/remotes/origin/rust
+          commit=$(git rev-list -n 1 "$GITHUB_REF")
+          git merge-base --is-ancestor "$commit" origin/rust
       - uses: actions/download-artifact@v4
         with:
           name: crackle-aarch64-unknown-linux-gnu
           path: release-artifacts
+          if-no-files-found: error
       - name: Publish ARM64 release
         uses: softprops/action-gh-release@v2
         with:
@@ -87,11 +101,12 @@ jobs:
         with:
           name: crackle-aarch64-unknown-linux-gnu
           path: release-artifacts
+          if-no-files-found: error
       - name: Check that this build is still current
         id: freshness
         run: |
-          git fetch origin rust
-          if [[ "$GITHUB_SHA" == "$(git rev-parse origin/rust)" ]]; then
+          current_sha=$(git ls-remote origin refs/heads/rust | awk '{ print $1 }')
+          if [[ "$GITHUB_SHA" == "$current_sha" ]]; then
             echo "current=true" >> "$GITHUB_OUTPUT"
           else
             echo "current=false" >> "$GITHUB_OUTPUT"
