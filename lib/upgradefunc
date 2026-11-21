@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+release_url="https://github.com/SayaAEP/crackle-rust/releases/download/nightly"
+binary_name="crackle-aarch64-unknown-linux-gnu"
+operation="${1:-install}"
+
+case "$operation" in
+    install|setup)
+        ;;
+    *)
+        printf 'Usage: upgradefunc [install|setup]\n' >&2
+        exit 2
+        ;;
+esac
+
+architecture=$(uname -m)
+case "$architecture" in
+    aarch64|arm64)
+        ;;
+    *)
+        printf 'Crackle nightly supports ARM64 Ubuntu Touch; detected %s.\n' "$architecture" >&2
+        exit 1
+        ;;
+esac
+
+: "${HOME:?HOME is not set}"
+temporary_directory=$(mktemp -d)
+trap 'rm -rf -- "$temporary_directory"' EXIT
+
+wget --quiet "$release_url/$binary_name" -O "$temporary_directory/$binary_name"
+wget --quiet "$release_url/SHA256SUMS" -O "$temporary_directory/SHA256SUMS"
+grep -Eq "^[[:xdigit:]]{64}  $binary_name$" "$temporary_directory/SHA256SUMS"
+(cd "$temporary_directory" && sha256sum --check SHA256SUMS)
+
+prefix="${PKG_PREFIX:-$HOME/.local}"
+bin_directory="$prefix/bin"
+destination="$bin_directory/crackle"
+staged_binary="$bin_directory/.crackle.new.$$"
+mkdir -p "$bin_directory"
+cp "$temporary_directory/$binary_name" "$staged_binary"
+chmod 755 "$staged_binary"
+mv -f "$staged_binary" "$destination"
+
+"$destination" setup
