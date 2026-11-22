@@ -57,7 +57,10 @@ fn removes_only_marker_owned_apt_dirs_and_keeps_unrelated_broken_links() {
         !cleanup.apt_config.exists(),
         "a directory Crackle never created is left alone"
     );
-    assert!(unrelated.exists(), "unrelated link is preserved");
+    assert!(
+        fs::symlink_metadata(&unrelated).is_ok(),
+        "unrelated link is preserved"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
