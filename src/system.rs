@@ -194,6 +194,13 @@ pub(super) fn run_os(program: &str, args: &[OsString]) -> io::Result<()> {
 
 pub(super) fn run_command(command: &mut Command) -> io::Result<std::process::ExitStatus> {
     let status = command.status()?;
+    if !status.success() {
+        // Let the caller report the command's own, specific failure instead
+        // of masking it behind a generic "operation interrupted" error - a
+        // pending interrupt is only relevant to stop a successful step's
+        // follow-on work, not to explain away a real command failure.
+        return Ok(status);
+    }
     check_interrupted()?;
     Ok(status)
 }
@@ -212,7 +219,9 @@ pub(super) fn run_cleanup(program: &str, args: &[&str]) -> io::Result<()> {
 
 pub(super) fn capture_command(command: &mut Command) -> io::Result<Output> {
     let output = command.output()?;
-    check_interrupted()?;
+    if output.status.success() {
+        check_interrupted()?;
+    }
     Ok(output)
 }
 

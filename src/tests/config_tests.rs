@@ -6,7 +6,7 @@ fn fixture(contents: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("crackle-config-{id}.nix"));
+    let path = env::temp_dir().join(format!("crackle-config-{id}.nix"));
     fs::write(&path, contents).unwrap();
     path
 }

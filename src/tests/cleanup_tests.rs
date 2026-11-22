@@ -6,7 +6,7 @@ fn temp_root() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("crackle-cleanup-{id}"));
+    let root = env::temp_dir().join(format!("crackle-cleanup-{id}"));
     fs::create_dir_all(&root).unwrap();
     root
 }

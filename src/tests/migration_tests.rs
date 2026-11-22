@@ -1,9 +1,10 @@
 use super::*;
+use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn rollback_restores_managed_files_and_removes_new_ones() {
-    let root = std::env::temp_dir().join(format!(
+    let root = env::temp_dir().join(format!(
         "crackle-migration-test-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

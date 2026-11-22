@@ -1,5 +1,6 @@
 use super::*;
 use std::io::Write;
+use std::mem;
 
 pub(super) fn sudo_command(args: &[&str]) -> io::Result<()> {
     println!("this action requires sudo access");
@@ -170,7 +171,9 @@ fn sudo_capture(args: &[&str]) -> io::Result<Output> {
         .stderr(Stdio::inherit())
         .spawn()?
         .wait_with_output()?;
-    check_interrupted()?;
+    if output.status.success() {
+        check_interrupted()?;
+    }
     Ok(output)
 }
 
@@ -210,6 +213,33 @@ fn sudo_readlink(path: &Path) -> io::Result<PathBuf> {
     Ok(PathBuf::from(target.trim_end_matches(['\r', '\n'])))
 }
 
+// Confirms `link` is a symlink that crackle itself created and is still
+// tracking (record exists, record matches `link`, the path is still a
+// symlink, and its actual on-disk target still matches the record). Returns
+// the verified target on success. Used by enable_sudo so that re-running
+// `crackle sudo $BIN` is idempotent on a link it already owns, instead of
+// treating its own prior work as a foreign conflict.
+fn verified_sudo_link(
+    name: &str,
+    link: &Path,
+    allowed_dirs: &[PathBuf],
+) -> io::Result<Option<PathBuf>> {
+    let Some(record) = read_sudo_link_record(name, allowed_dirs)? else {
+        return Ok(None);
+    };
+    if record.link != link {
+        return Ok(None);
+    }
+    if !sudo_path_test(link, "[ -L \"$1\" ]")? {
+        return Ok(None);
+    }
+    let target = sudo_readlink(link)?;
+    if !sudo_link_matches_record(Some(&record), name, link, &target, allowed_dirs) {
+        return Ok(None);
+    }
+    Ok(Some(target))
+}
+
 pub(super) fn sudo_link(args: &[OsString], enable: bool) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
@@ -244,19 +274,33 @@ fn enable_sudo(args: &[OsString]) -> io::Result<()> {
         let path = PathBuf::from(String::from_utf8_lossy(&resolved.stdout).trim());
         let canonical = fs::canonicalize(path)?;
         let link = destination.join(name);
-        if sudo_path_test(&link, "[ -e \"$1\" ] || [ -L \"$1\" ]")? {
-            eprintln!(
-                "Crackle: {} already exists; it was not registered as a Crackle sudo link.",
-                link.display()
-            );
-            continue;
+        let link_path = link
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 link path"))?;
+        match verified_sudo_link(name, &link, &sudo_link_dirs())? {
+            Some(existing_target) if existing_target == canonical => {
+                // Already set up correctly by a previous `crackle sudo` run -
+                // nothing to do.
+                continue;
+            }
+            Some(_) => {
+                // Ours, but stale (the resolved binary moved, e.g. after a
+                // Nix upgrade) - safe to replace since we verified we own it.
+                sudo_command(&["rm", "--", link_path])?;
+            }
+            None => {
+                if sudo_path_test(&link, "[ -e \"$1\" ] || [ -L \"$1\" ]")? {
+                    eprintln!(
+                        "Crackle: {} already exists; it was not registered as a Crackle sudo link.",
+                        link.display()
+                    );
+                    continue;
+                }
+            }
         }
         let target = canonical.to_str().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 executable path")
         })?;
-        let link_path = link
-            .to_str()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 link path"))?;
         sudo_command(&["ln", "-s", "--", target, link_path])?;
         if let Err(error) = write_sudo_link_record(name, &link, &canonical) {
             let rollback = sudo_command(&["rm", "--", link_path]);
@@ -320,6 +364,36 @@ fn disable_sudo(args: &[OsString]) -> io::Result<()> {
         ])?;
     }
     run("sudo", &["-k"])
+}
+
+/// Best-effort cleanup for a package that was just removed via
+/// `crackle remove`/`nix-manager remove`: if it also had a `crackle sudo`
+/// link, that link's target (a path inside a now-collected Nix generation)
+/// is gone, so the symlink and its ownership record would otherwise linger
+/// forever. This never touches a link crackle doesn't own, and never touches
+/// one whose recorded target still exists (it might still be valid through
+/// another profile). Failures here are reported but never fail the caller's
+/// `remove` - this is a convenience, not a correctness requirement.
+pub(super) fn cleanup_stale_sudo_link(name: &str) {
+    let allowed_dirs = sudo_link_dirs();
+    let record = match read_sudo_link_record(name, &allowed_dirs) {
+        Ok(record) => record,
+        Err(_) => return,
+    };
+    let Some(record) = record else {
+        return; // `crackle sudo` was never used for this package
+    };
+    if record.target.exists() {
+        return; // still resolvable; leave it alone
+    }
+    println!(
+        "Removing the stale sudo link for '{name}' ({})...",
+        record.link.display()
+    );
+    let name_arg = OsString::from(name);
+    if let Err(error) = disable_sudo(std::slice::from_ref(&name_arg)) {
+        eprintln!("Crackle: could not clean up the sudo link for '{name}': {error}");
+    }
 }
 
 // Mirrors `config_sudo()`: ensure /root/.profile exists, add a PATH line
@@ -691,7 +765,7 @@ impl RemountTransaction {
             }
             Err(error) => first_error = Some(error),
         }
-        let temporary_mounts = std::mem::take(&mut self.temporary_apt_mounts);
+        let temporary_mounts = mem::take(&mut self.temporary_apt_mounts);
         for path in temporary_mounts.into_iter().rev() {
             match run_cleanup("sudo", &["umount", path]) {
                 Ok(()) => {}

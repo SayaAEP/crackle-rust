@@ -21,8 +21,8 @@ use helpers::{desktop_entry, legacy_triplet_from_bash, mount_option_from, sudo_d
 use installer::install_binaries_at;
 use installer::{install_binaries, install_binary_as, write_completion};
 use maintenance::{
-    check_interrupted, install_signal_handlers, migrate, nuke, remount_root, rollback,
-    sudo_command, sudo_link,
+    check_interrupted, cleanup_stale_sudo_link, install_signal_handlers, migrate, nuke,
+    remount_root, rollback, sudo_command, sudo_link,
 };
 #[cfg(test)]
 use maintenance::{interruption_result, mount_restore_option};
@@ -35,7 +35,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output, Stdio, exit};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use system::*;
@@ -78,7 +78,7 @@ fn main() {
     install_signal_handlers();
     if let Err(error) = dispatch() {
         eprintln!("Crackle: {error}");
-        std::process::exit(100);
+        exit(100);
     }
 }
 

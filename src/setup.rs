@@ -644,8 +644,8 @@ fn build_configuration() -> io::Result<()> {
     let output = command("home-manager")
         .args(["build", "--no-out-link"])
         .output()?;
-    check_interrupted()?;
     if output.status.success() {
+        check_interrupted()?;
         return Ok(());
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -685,6 +685,7 @@ pub(super) fn nix_manager(args: &[OsString]) -> io::Result<()> {
             }
             let path = config::config_path()?;
             let names = packages.join(", ");
+            let requested_names = packages.clone();
             let backup = backup_config(&path)?;
             let packages: Vec<String> = packages
                 .into_iter()
@@ -728,6 +729,9 @@ pub(super) fn nix_manager(args: &[OsString]) -> io::Result<()> {
             if operation == "remove" {
                 println!("Cleaning up...");
                 run("nix-collect-garbage", &["-d"])?;
+                for name in &requested_names {
+                    cleanup_stale_sudo_link(name.strip_prefix("pkgs.").unwrap_or(name));
+                }
             }
         }
         "clean" => {

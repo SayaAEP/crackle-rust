@@ -4,6 +4,8 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::download_file;
+
 #[cfg(test)]
 #[path = "tests/migration_tests.rs"]
 mod tests;
@@ -129,7 +131,7 @@ fn push_relative(path: &Path, prefix: &Path, paths: &mut Vec<ManagedPath>) -> io
 }
 
 fn release_asset(url: &str, destination: &Path) -> io::Result<()> {
-    crate::download_file(url, destination)
+    download_file(url, destination)
         .map_err(|error| io::Error::other(format!("download failed: {url}: {error}")))
 }
 

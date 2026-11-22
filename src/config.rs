@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -189,7 +190,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 pub fn config_path() -> io::Result<PathBuf> {
-    let home = std::env::var_os("HOME")
+    let home = env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
     let path = home.join(".config/home-manager/home.nix");

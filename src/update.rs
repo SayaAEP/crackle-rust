@@ -1,5 +1,6 @@
 use super::*;
 use std::io::Write;
+use std::process::exit;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Channel {
@@ -296,7 +297,7 @@ fn fetch_release_metadata(channel: Channel, layout: InstallLayout) -> io::Result
 
 fn exit_with(code: i32) -> ! {
     let _ = io::stdout().flush();
-    std::process::exit(code)
+    exit(code)
 }
 
 pub(super) fn check_update(values: &[OsString]) -> io::Result<()> {

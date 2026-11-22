@@ -1,4 +1,5 @@
 use super::*;
+use std::process::exit;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CommandGroup {
@@ -163,7 +164,7 @@ pub(super) fn dispatch() -> io::Result<()> {
     // are separate legacy scripts and stay exempt.
     if is_root() && env::var_os("ROOT").is_none() {
         println!("Crackle: please don't run me as root");
-        std::process::exit(100);
+        exit(100);
     }
 
     let command = args
@@ -207,11 +208,6 @@ pub(super) fn dispatch() -> io::Result<()> {
 }
 
 pub(super) fn help_text() -> String {
-    let width = COMMANDS
-        .iter()
-        .map(|command| command.usage.len())
-        .max()
-        .unwrap_or(0);
     let mut text = format!(
         "crackle {} ({}, {}) - Nix home-manager on Ubuntu Touch\n\nUsage: crackle <command> [arguments]\n",
         CRACKLE_VERSION,
@@ -225,10 +221,27 @@ pub(super) fn help_text() -> String {
         CommandGroup::Maintenance,
         CommandGroup::Migration,
     ] {
+        let members: Vec<&CommandSpec> = COMMANDS
+            .iter()
+            .filter(|command| command.group == group)
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        // Align each group's own column independently, so one long usage
+        // string elsewhere doesn't drag every other group's spacing wide.
+        let width = members
+            .iter()
+            .map(|command| command.usage.len())
+            .max()
+            .unwrap_or(0);
+        let title = group.title();
         text.push('\n');
-        text.push_str(group.title());
+        text.push_str(title);
         text.push('\n');
-        for command in COMMANDS.iter().filter(|command| command.group == group) {
+        text.push_str(&"-".repeat(title.len()));
+        text.push('\n');
+        for command in members {
             text.push_str(&format!(
                 "  {:<width$}  {}\n",
                 command.usage,

@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -119,7 +120,7 @@ impl Cleanup {
     }
 
     fn sudo_clean(&self) {
-        if std::env::var_os("CRACKLE_SKIP_SUDO_CLEAN").is_some() {
+        if env::var_os("CRACKLE_SKIP_SUDO_CLEAN").is_some() {
             return;
         }
         let directories = ["/root/.local/bin", "/snap/bin"];
