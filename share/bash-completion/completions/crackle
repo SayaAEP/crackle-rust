@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+_crackle()
+{
+    local cur prev
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[1]}"
+    case $COMP_CWORD in
+	    1) COMPREPLY=( $(compgen -W "$(_crackleopts)" -- ${cur}) );;
+	    *);;
+    esac
+    case $prev in
+	    click) COMPREPLY=( $( apt-cache --no-generate pkgnames "$cur" 2> /dev/null ) );;
+	    remove) COMPREPLY=( $(compgen -W "$(nix-manager list)" -- ${cur}) );;
+    esac
+
+    return 0
+}
+complete -F _crackle crackle

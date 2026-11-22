@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+release_url="${CRACKLE_RELEASE_URL:-https://github.com/SayaAEP/crackle-rust/releases/download/nightly}"
+binary_name="crackle-aarch64-unknown-linux-gnu"
+operation="${1:-install}"
+
+case "$operation" in
+    install|setup)
+        ;;
+    *)
+        printf 'Usage: upgradefunc [install|setup]\n' >&2
+        exit 2
+        ;;
+esac
+
+architecture="${CRACKLE_ARCH_OVERRIDE:-$(uname -m)}"
+case "$architecture" in
+    aarch64|arm64)
+        ;;
+    *)
+        printf 'Crackle nightly supports ARM64 Ubuntu Touch; detected %s.\n' "$architecture" >&2
+        exit 1
+        ;;
+esac
+
+for tool in wget sha256sum awk grep head mktemp; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        printf 'Crackle nightly requires %s, which was not found.\n' "$tool" >&2
+        exit 1
+    fi
+done
+
+prefix="${PKG_PREFIX:-${HOME:?HOME is not set}/.local}"
+bin_directory="$prefix/bin"
+
+# Legacy Crackle ships Bash/Python helpers under lib/; its bin/crackle is a
+# script. The Rust binary is an ELF executable, so a shebang means legacy.
+legacy=0
+for marker in lib/basefunc lib/clickfunc lib/setupfunc lib/upgradefunc lib/sudofunc; do
+    if [ -e "$prefix/$marker" ]; then
+        legacy=1
+        break
+    fi
+done
+if [ -f "$bin_directory/crackle" ]; then
+    magic=$(head -c 2 "$bin_directory/crackle" 2>/dev/null || true)
+    if [ "$magic" = '#!' ]; then
+        legacy=1
+    fi
+fi
+
+install_name="${CRACKLE_INSTALL_AS:-}"
+if [ -z "$install_name" ]; then
+    if [ "$legacy" -eq 1 ] || [ -f "$bin_directory/crackle-rust" ]; then
+        install_name="crackle-rust"
+    else
+        install_name="crackle"
+    fi
+fi
+
+case "$install_name" in
+    */*|.*|'')
+        printf 'Invalid install name: %s\n' "$install_name" >&2
+        exit 2
+        ;;
+esac
+
+if [ "$legacy" -eq 1 ] && [ "$install_name" = "crackle" ] && [ "${CRACKLE_FORCE_REPLACE:-0}" != "1" ]; then
+    printf 'Legacy Crackle is installed; refusing to overwrite %s.\n' "$bin_directory/crackle" >&2
+    printf 'Install side-by-side (default with legacy present) or use `crackle-rust migrate` to replace it explicitly.\n' >&2
+    exit 1
+fi
+
+temporary_directory=$(mktemp -d)
+staged_binary=""
+cleanup() {
+    rm -rf -- "$temporary_directory"
+    if [ -n "$staged_binary" ]; then
+        rm -f -- "$staged_binary"
+    fi
+}
+trap cleanup EXIT
+
+wget -q -O "$temporary_directory/$binary_name" "$release_url/$binary_name"
+wget -q -O "$temporary_directory/SHA256SUMS" "$release_url/SHA256SUMS"
+
+expected=$(awk -v name="$binary_name" '{
+    sub(/\r$/, "")
+    if ($2 == name) { print $1; exit }
+}' "$temporary_directory/SHA256SUMS")
+if ! printf '%s' "$expected" | grep -Eq '^[[:xdigit:]]{64}$'; then
+    printf 'Could not find a valid checksum for %s in SHA256SUMS.\n' "$binary_name" >&2
+    exit 1
+fi
+
+actual=$(sha256sum "$temporary_directory/$binary_name" | awk '{ print $1 }')
+if [ "$actual" != "$expected" ]; then
+    printf 'Checksum verification failed for %s.\n' "$binary_name" >&2
+    exit 1
+fi
+
+mkdir -p "$bin_directory"
+destination="$bin_directory/$install_name"
+staged_binary="$bin_directory/.$install_name.new.$$"
+cp "$temporary_directory/$binary_name" "$staged_binary"
+chmod 755 "$staged_binary"
+mv -f "$staged_binary" "$destination"
+staged_binary=""
+
+layout="standard"
+if [ "$install_name" = "crackle-rust" ]; then
+    layout="side-by-side"
+fi
+
+if [ "$legacy" -eq 1 ]; then
+    printf 'Legacy Crackle detected; installed side-by-side as %s and left existing files untouched.\n' "$destination"
+else
+    printf 'Installed %s.\n' "$destination"
+fi
+
+CRACKLE_INSTALL_LAYOUT="$layout" "$destination" setup
