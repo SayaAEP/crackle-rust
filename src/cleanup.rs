@@ -9,6 +9,10 @@ use crate::command;
 /// directory (which could delete a pre-existing user or system configuration).
 pub(crate) const OWNED_MARKER: &str = ".crackle-owned";
 
+#[cfg(test)]
+#[path = "tests/cleanup_tests.rs"]
+mod tests;
+
 pub(crate) fn mark_owned(path: &Path) {
     if let Err(error) = fs::write(path.join(OWNED_MARKER), b"crackle\n") {
         eprintln!(

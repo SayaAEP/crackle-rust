@@ -58,7 +58,7 @@ wget -qO- \
   | bash -s -- install
 ```
 
-The installer asset is available after the `rust` branch's first successful
+The installer asset is available after the `rust-next` branch's first successful
 nightly workflow run.
 
 The script checks that the device reports ARM64, downloads the prebuilt
@@ -69,7 +69,7 @@ untouched; on a clean machine it installs `~/.local/bin/crackle`. It then runs
 `setup` (install-only when legacy is present). It requires `wget`, `bash`,
 `sha256sum`, `awk`, and `head`; no Rust toolchain is needed. Re-run the same
 command to update to the latest nightly. Nightly builds are for testing and may
-change with each push to the `rust` branch.
+change with each push to the `rust-next` branch.
 
 Overrides: `CRACKLE_INSTALL_AS` chooses the installed name, `CRACKLE_SETUP_NIX=1`
 runs the full environment setup in side-by-side mode, `CRACKLE_FORCE_REPLACE=1`
@@ -158,6 +158,14 @@ Rust and Cargo are needed only to build Crackle from source:
 ```sh
 cargo build --release
 ```
+
+The development branch is `rust-next`; its CI publishes ARM64 nightlies on
+pushes and on the scheduled build. Stable releases are manually dispatched
+from the GitHub Actions **Stable release** workflow with an `auto`, `patch`,
+`minor`, or `major` increment. `auto` selects major for breaking changes, minor
+for `feat` commits, and patch otherwise. Commit messages use Conventional
+Commits (for example, `fix: preserve the existing config`). The package starts
+at `0.0.0`; no release is created by a normal branch push.
 
 ## Compatibility
 

@@ -1,0 +1,124 @@
+name: Stable release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semantic version increment
+        required: true
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+        default: auto
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/rust-next'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: crackle-stable-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+          components: rustfmt, clippy
+      - name: Install ARM64 linker
+        run: sudo apt-get update && sudo apt-get install --yes gcc-aarch64-linux-gnu
+      - name: Validate source and commit messages
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          python3 -B -m unittest discover -s scripts -p 'test_*.py'
+      - name: Calculate version and release notes
+        id: release
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          version=$(python3 scripts/release.py prepare --bump "$BUMP")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+      - name: Update manifests and changelog
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          python3 - "$VERSION" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          version = sys.argv[1]
+          manifest = pathlib.Path("Cargo.toml")
+          text = manifest.read_text(encoding="utf-8")
+          updated, count = re.subn(
+              r'(?m)^version = "[^"]+"$',
+              f'version = "{version}"',
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("could not update Cargo.toml package version")
+          manifest.write_text(updated, encoding="utf-8")
+
+          notes = pathlib.Path("release-notes.md").read_text(encoding="utf-8")
+          changelog = pathlib.Path("CHANGELOG.md")
+          previous = changelog.read_text(encoding="utf-8") if changelog.exists() else "# Changelog\n"
+          changelog.write_text(f"{previous.rstrip()}\n\n{notes}", encoding="utf-8")
+          PY
+          cargo check
+          cargo test --locked
+      - name: Create release commit and tag
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore(release): $TAG"
+          git tag -a "$TAG" -m "$TAG"
+      - name: Build ARM64 release
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          commit=$(git rev-parse HEAD)
+          built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          CRACKLE_VERSION=$VERSION \
+          CRACKLE_CHANNEL=stable \
+          CRACKLE_COMMIT=$commit \
+          CRACKLE_BUILT=$built \
+          cargo build --locked --release --target aarch64-unknown-linux-gnu
+          cp target/aarch64-unknown-linux-gnu/release/crackle crackle-aarch64-unknown-linux-gnu
+          sha256sum crackle-aarch64-unknown-linux-gnu > SHA256SUMS
+          printf 'channel=stable\nversion=%s\ntag=%s\ncommit=%s\nbuilt=%s\n' \
+            "$VERSION" "$TAG" "$commit" "$built" > version.txt
+      - name: Push release commit and tag atomically
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: git push --atomic origin HEAD:refs/heads/rust-next "refs/tags/$TAG"
+      - name: Publish ARM64 release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Crackle ${{ steps.release.outputs.tag }}
+          tag_name: ${{ steps.release.outputs.tag }}
+          overwrite_files: true
+          make_latest: true
+          body_path: release-notes.md
+          files: |
+            crackle-aarch64-unknown-linux-gnu
+            SHA256SUMS
+            version.txt

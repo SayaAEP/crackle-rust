@@ -4,6 +4,10 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+#[path = "tests/migration_tests.rs"]
+mod tests;
+
 const ASSET: &str = "crackle-aarch64-unknown-linux-gnu";
 const RELEASE_BASE: &str = "https://github.com/SayaAEP/crackle-rust/releases/latest/download";
 

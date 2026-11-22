@@ -202,3 +202,7 @@ pub fn config_path() -> io::Result<PathBuf> {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "tests/config_tests.rs"]
+mod tests;

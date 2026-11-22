@@ -1,6 +1,6 @@
 [package]
 name = "crackle"
-version = "0.6.0"
+version = "0.0.0"
 edition = "2024"
 description = "A Rust client for setting up Nix home-manager on Ubuntu Touch"
 license = "GPL-3.0-or-later"
