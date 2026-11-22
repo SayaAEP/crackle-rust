@@ -7,6 +7,208 @@ pub(super) fn sudo_command(args: &[&str]) -> io::Result<()> {
 }
 
 const SUDO_DEFAULT_BIN: &str = "/root/.local/bin";
+const SUDO_SNAP_BIN: &str = "/snap/bin";
+const SUDO_LINK_STATE_DIR: &str = "/root/.local/state/crackle/sudo-links";
+
+#[derive(Debug, PartialEq, Eq)]
+struct SudoLinkRecord {
+    link: PathBuf,
+    target: PathBuf,
+}
+
+fn sudo_link_dirs() -> [PathBuf; 2] {
+    [
+        PathBuf::from(SUDO_DEFAULT_BIN),
+        PathBuf::from(SUDO_SNAP_BIN),
+    ]
+}
+
+fn sudo_link_state_dir() -> PathBuf {
+    PathBuf::from(SUDO_LINK_STATE_DIR)
+}
+
+fn sudo_link_name(name: &OsString) -> io::Result<&str> {
+    let name = name
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "binary name is not UTF-8"))?;
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name
+            .bytes()
+            .any(|byte| matches!(byte, b'/' | b'\\' | b'\0' | b'\n' | b'\r' | b'\t'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "binary name must be a single path component",
+        ));
+    }
+    Ok(name)
+}
+
+fn parse_sudo_link_record(
+    name: &str,
+    contents: &str,
+    allowed_dirs: &[PathBuf],
+) -> io::Result<SudoLinkRecord> {
+    let mut lines = contents.lines();
+    let link = lines
+        .next()
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing sudo link path"))?;
+    let target = lines
+        .next()
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing sudo link target"))?;
+    let parent = link.parent();
+    if lines.next().is_some()
+        || !link.is_absolute()
+        || !target.is_absolute()
+        || link.file_name().and_then(|value| value.to_str()) != Some(name)
+        || !allowed_dirs
+            .iter()
+            .any(|directory| parent == Some(directory.as_path()))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid sudo link ownership record",
+        ));
+    }
+    Ok(SudoLinkRecord { link, target })
+}
+
+fn read_sudo_link_record(
+    name: &str,
+    allowed_dirs: &[PathBuf],
+) -> io::Result<Option<SudoLinkRecord>> {
+    let path = sudo_link_state_dir().join(name);
+    let path = path
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 record path"))?;
+    let output = sudo_capture(&[
+        "sh",
+        "-c",
+        "if [ -f \"$1\" ]; then cat -- \"$1\"; else exit 44; fi",
+        "sh",
+        path,
+    ])?;
+    if output.status.code() == Some(44) {
+        return Ok(None);
+    }
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "could not read sudo link ownership record for '{name}'"
+        )));
+    }
+    let contents = String::from_utf8(output.stdout)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    parse_sudo_link_record(name, &contents, allowed_dirs).map(Some)
+}
+
+fn sudo_link_matches_record(
+    record: Option<&SudoLinkRecord>,
+    name: &str,
+    link: &Path,
+    target: &Path,
+    allowed_dirs: &[PathBuf],
+) -> bool {
+    record.is_some_and(|record| {
+        record.link == link
+            && record.target == target
+            && record.link.file_name().and_then(|value| value.to_str()) == Some(name)
+            && allowed_dirs
+                .iter()
+                .any(|directory| record.link.parent() == Some(directory.as_path()))
+    })
+}
+
+fn write_sudo_link_record(name: &str, link: &Path, target: &Path) -> io::Result<()> {
+    let state_dir = sudo_link_state_dir();
+    let record_path = state_dir.join(name);
+    let link = link
+        .to_str()
+        .filter(|value| !value.contains('\n') && !value.contains('\r'))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid sudo link path"))?;
+    let target = target
+        .to_str()
+        .filter(|value| !value.contains('\n') && !value.contains('\r'))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid sudo link target"))?;
+    let record_path = record_path
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 record path"))?;
+    let temporary = state_dir.join(format!(".{name}.tmp-{}", std::process::id()));
+    let temporary = temporary
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 temporary path"))?;
+    sudo_command(&["mkdir", "-p", SUDO_LINK_STATE_DIR])?;
+    let mut child = command("sudo")
+        .args(["tee", "--", temporary])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("could not open sudo record input"))?
+        .write_all(format!("{link}\n{target}\n").as_bytes())?;
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(io::Error::other(
+            "could not write sudo link ownership record",
+        ));
+    }
+    sudo_command(&["mv", "-f", "--", temporary, record_path])
+}
+
+fn sudo_capture(args: &[&str]) -> io::Result<Output> {
+    let output = command("sudo")
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?
+        .wait_with_output()?;
+    check_interrupted()?;
+    Ok(output)
+}
+
+fn sudo_path_test(path: &Path, expression: &str) -> io::Result<bool> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 sudo link path"))?;
+    let script = format!("if {expression}; then exit 0; else exit 3; fi");
+    let status = run_command(command("sudo").args(["sh", "-c", &script, "sh", path]))?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(3) => Ok(false),
+        _ => Err(io::Error::other(format!(
+            "could not inspect sudo link '{path}'"
+        ))),
+    }
+}
+
+fn sudo_readlink(path: &Path) -> io::Result<PathBuf> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 sudo link path"))?;
+    let output = command("sudo")
+        .args(["readlink", "--", path])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?
+        .wait_with_output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "could not read sudo link target for '{path}'"
+        )));
+    }
+    let target = String::from_utf8(output.stdout)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(PathBuf::from(target.trim_end_matches(['\r', '\n'])))
+}
 
 pub(super) fn sudo_link(args: &[OsString], enable: bool) -> io::Result<()> {
     if args.is_empty() {
@@ -22,10 +224,6 @@ pub(super) fn sudo_link(args: &[OsString], enable: bool) -> io::Result<()> {
     }
 }
 
-// Mirrors the original `enable_sudo()` in lib/sudofunc: config_sudo() when
-// there's no Snap, unconfig_sudo() (which tears down the old setup and
-// switches to /snap/bin) when there is, then one `ln -s` per package -
-// only when the link doesn't already exist, never overwriting it.
 fn enable_sudo(args: &[OsString]) -> io::Result<()> {
     let destination = if Path::new("/snap/bin").is_dir() {
         unconfigure_sudo_profile()?;
@@ -35,8 +233,8 @@ fn enable_sudo(args: &[OsString]) -> io::Result<()> {
         PathBuf::from(SUDO_DEFAULT_BIN)
     };
     for name in args {
-        let name = name.to_string_lossy();
-        let resolved = capture_command(Command::new("which").arg(name.as_ref()))?;
+        let name = sudo_link_name(name)?;
+        let resolved = capture_command(Command::new("which").arg(name))?;
         if !resolved.status.success() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -45,38 +243,81 @@ fn enable_sudo(args: &[OsString]) -> io::Result<()> {
         }
         let path = PathBuf::from(String::from_utf8_lossy(&resolved.stdout).trim());
         let canonical = fs::canonicalize(path)?;
-        let link = destination.join(name.as_ref());
-        if !link.is_file() {
-            sudo_command(&[
-                "ln",
-                "-s",
-                canonical.to_str().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 executable path")
-                })?,
-                link.to_str().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 link path")
-                })?,
-            ])?;
+        let link = destination.join(name);
+        if sudo_path_test(&link, "[ -e \"$1\" ] || [ -L \"$1\" ]")? {
+            eprintln!(
+                "Crackle: {} already exists; it was not registered as a Crackle sudo link.",
+                link.display()
+            );
+            continue;
+        }
+        let target = canonical.to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 executable path")
+        })?;
+        let link_path = link
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 link path"))?;
+        sudo_command(&["ln", "-s", "--", target, link_path])?;
+        if let Err(error) = write_sudo_link_record(name, &link, &canonical) {
+            let rollback = sudo_command(&["rm", "--", link_path]);
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(io::Error::other(format!(
+                    "could not record sudo link ({error}); rollback failed ({rollback_error})"
+                ))),
+            };
         }
     }
     run("sudo", &["-k"])
 }
 
-// Mirrors the original `disable_sudo()`: it never looks at /snap/bin or
-// SUDO_BIN directly - it resolves each package through `sudo -i which`
-// (which sees root's PATH, including whatever enable_sudo wired up) and
-// removes exactly what that resolves to.
 fn disable_sudo(args: &[OsString]) -> io::Result<()> {
+    let state_dir = sudo_link_state_dir();
+    let allowed_dirs = sudo_link_dirs();
     for name in args {
-        let name = name.to_string_lossy();
-        println!("this action requires sudo access");
-        let resolved = capture_command(command("sudo").args(["-i", "which", name.as_ref()]))?;
-        if resolved.status.success() {
-            let path = String::from_utf8_lossy(&resolved.stdout).trim().to_owned();
-            if !path.is_empty() && Path::new(&path).is_file() {
-                sudo_command(&["rm", path.as_str()])?;
-            }
+        let name = sudo_link_name(name)?;
+        let record = read_sudo_link_record(name, &allowed_dirs)?;
+        let Some(record) = record else {
+            eprintln!("Crackle: no tracked sudo link for '{name}'; leaving it untouched.");
+            continue;
+        };
+        if !sudo_path_test(&record.link, "[ -e \"$1\" ] || [ -L \"$1\" ]")? {
+            sudo_command(&[
+                "rm",
+                "--",
+                state_dir.join(name).to_str().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 record path")
+                })?,
+            ])?;
+            continue;
         }
+        if !sudo_path_test(&record.link, "[ -L \"$1\" ]")? {
+            eprintln!(
+                "Crackle: {} is no longer a symlink; leaving it untouched.",
+                record.link.display()
+            );
+            continue;
+        }
+        let target = sudo_readlink(&record.link)?;
+        if !sudo_link_matches_record(Some(&record), name, &record.link, &target, &allowed_dirs) {
+            eprintln!(
+                "Crackle: {} no longer matches its recorded target; leaving it untouched.",
+                record.link.display()
+            );
+            continue;
+        }
+        let path = record
+            .link
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 link path"))?;
+        sudo_command(&["rm", "--", path])?;
+        sudo_command(&[
+            "rm",
+            "--",
+            state_dir.join(name).to_str().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "non-UTF8 record path")
+            })?,
+        ])?;
     }
     run("sudo", &["-k"])
 }
@@ -248,7 +489,6 @@ pub(super) fn nuke() -> io::Result<()> {
     ] {
         remove_path(&home.join(relative));
     }
-
     if layout.is_side_by_side() && !legacy {
         // crackle-rust-only machine: remove only files this layout created.
         remove_path(&prefix.join("bin").join(layout.main_name()));
@@ -331,6 +571,10 @@ pub(super) fn rollback(id: Option<&str>) -> io::Result<()> {
         id,
     )
 }
+
+#[cfg(test)]
+#[path = "tests/maintenance_tests.rs"]
+mod tests;
 
 #[cfg(unix)]
 extern "C" fn mark_interrupted(_signal: i32) {

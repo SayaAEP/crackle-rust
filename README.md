@@ -112,6 +112,12 @@ crackle nuke
 crackle help
 ```
 
+- `crackle sudo BINARY...` records only links it creates for `sudo -i`;
+  `crackle sudok BINARY...` removes only those recorded links when their
+  targets still match. Existing `/snap/bin` entries and older links without a
+  record are left alone. Inspect older links with `readlink /snap/bin/NAME`
+  (and `snap aliases`, where available) and verify their owner before removing
+  them manually.
 - `version`, `--version`, and `-V` print the embedded version, release channel,
   commit, build time, and target. Local builds identify themselves as `dev`.
 - `check-update [nightly|stable]` checks release metadata only and never installs

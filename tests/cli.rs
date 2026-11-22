@@ -251,3 +251,33 @@ fn nuke_is_best_effort_and_cleans_crackle_files() {
     assert!(!completion.exists());
     assert!(!unrelated.exists(), "home-manager state is removed");
 }
+
+#[test]
+fn sudok_leaves_an_untracked_existing_binary_untouched() {
+    let fixture = Fixture::new("sudok-untracked");
+    let existing = fixture.root.join("snap/bin/file");
+    fs::create_dir_all(existing.parent().unwrap()).unwrap();
+    fs::write(&existing, "Snap-managed command").unwrap();
+    let existing_path = existing.display();
+    let log = fixture.log.display();
+    fixture.stub(
+        "sudo",
+        &format!(
+            "printf '%s %s\\n' sudo \"$*\" >> '{log}'\n\
+             if [ \"$1\" = \"sh\" ] && [ \"$2\" = \"-c\" ]; then exit 44; fi\n\
+             if [ \"$1\" = \"-i\" ] && [ \"$2\" = \"which\" ] && [ \"$3\" = \"file\" ]; then\n\
+                 printf '%s\\n' '{existing_path}'\n\
+                 exit 0\n\
+             fi\n\
+             if [ \"$1\" = \"rm\" ]; then /bin/rm -- \"$2\"; fi\n\
+             exit 0"
+        ),
+    );
+
+    let output = fixture.run(&["sudok", "file"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(existing.is_file(), "`sudok` removed an untracked command");
+    assert!(!fixture.calls().contains("sudo rm"));
+    assert!(!fixture.calls().contains("sudo -i which file"));
+    assert!(stderr(&output).contains("no tracked sudo link"));
+}
