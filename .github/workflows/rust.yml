@@ -27,6 +27,11 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Analyze code quality
+        uses: RAprogramm/cargo-quality@v0.6.0
+        with:
+          fail_on_issues: false
+          post_comment: false
       - run: bash -n lib/upgradefunc
 
   arm64:
