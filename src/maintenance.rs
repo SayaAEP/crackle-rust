@@ -342,6 +342,14 @@ unsafe extern "C" {
     fn signal(signal: i32, handler: usize) -> usize;
 }
 
+pub(super) fn install_signal_handlers() {
+    #[cfg(unix)]
+    unsafe {
+        signal(2, mark_interrupted as *const () as usize);
+        signal(15, mark_interrupted as *const () as usize);
+    }
+}
+
 pub(super) fn remount_root() -> io::Result<()> {
     // Legacy `remount` cleared cached sudo credentials in its BEGIN block.
     if let Err(error) = run_cleanup("sudo", &["-K"]) {

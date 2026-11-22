@@ -21,7 +21,8 @@ use helpers::{desktop_entry, legacy_triplet_from_bash, mount_option_from, sudo_d
 use installer::install_binaries_at;
 use installer::{install_binaries, install_binary_as, write_completion};
 use maintenance::{
-    check_interrupted, migrate, nuke, remount_root, rollback, sudo_command, sudo_link,
+    check_interrupted, install_signal_handlers, migrate, nuke, remount_root, rollback,
+    sudo_command, sudo_link,
 };
 #[cfg(test)]
 use maintenance::{interruption_result, mount_restore_option};
@@ -86,14 +87,6 @@ fn short_commit() -> String {
         return "unknown".to_owned();
     }
     CRACKLE_COMMIT.chars().take(7).collect()
-}
-
-fn install_signal_handlers() {
-    #[cfg(unix)]
-    unsafe {
-        signal(2, mark_interrupted as *const () as usize);
-        signal(15, mark_interrupted as *const () as usize);
-    }
 }
 
 #[cfg(test)]
