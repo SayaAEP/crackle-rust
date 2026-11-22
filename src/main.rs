@@ -28,25 +28,161 @@ const COMMAND_NAMES: &[&str] = &[
     "rwnix",
 ];
 
-/// Every user-visible subcommand, in help/completion order. `show_help()` and
-/// `_crackleopts()` both read this so the installed completion cannot drift.
-const SUBCOMMANDS: &[&str] = &[
-    "setup",
-    "migrate",
-    "rollback",
-    "sudo",
-    "sudok",
-    "clean",
-    "install",
-    "remove",
-    "update",
-    "debug",
-    "list",
-    "crack",
-    "click",
-    "bump-version",
-    "nuke",
-    "help",
+const CRACKLE_VERSION: &str = env!("CRACKLE_VERSION");
+const CRACKLE_CHANNEL: &str = env!("CRACKLE_CHANNEL");
+const CRACKLE_COMMIT: &str = env!("CRACKLE_COMMIT");
+const CRACKLE_BUILT: &str = env!("CRACKLE_BUILT");
+const CRACKLE_TARGET: &str = env!("CRACKLE_TARGET");
+const RELEASE_BASE_NIGHTLY: &str =
+    "https://github.com/SayaAEP/crackle-rust/releases/download/nightly";
+const RELEASE_BASE_STABLE: &str =
+    "https://github.com/SayaAEP/crackle-rust/releases/latest/download";
+const RELEASE_BINARY: &str = "crackle-aarch64-unknown-linux-gnu";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommandGroup {
+    Setup,
+    Packages,
+    Touch,
+    Maintenance,
+    Migration,
+}
+
+impl CommandGroup {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Setup => "Setup and updates",
+            Self::Packages => "Packages",
+            Self::Touch => "Ubuntu Touch",
+            Self::Maintenance => "Maintenance",
+            Self::Migration => "Migration",
+        }
+    }
+}
+
+struct CommandSpec {
+    name: &'static str,
+    usage: &'static str,
+    summary: &'static str,
+    group: CommandGroup,
+}
+
+/// One table for help, completion, and tests so they cannot drift.
+const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "setup",
+        usage: "setup",
+        summary: "Install/configure Nix and home-manager",
+        group: CommandGroup::Setup,
+    },
+    CommandSpec {
+        name: "update",
+        usage: "update",
+        summary: "Update Nix channels and activate home-manager",
+        group: CommandGroup::Setup,
+    },
+    CommandSpec {
+        name: "version",
+        usage: "version",
+        summary: "Show version, channel, commit, and target",
+        group: CommandGroup::Setup,
+    },
+    CommandSpec {
+        name: "check-update",
+        usage: "check-update [chan]",
+        summary: "Check for a newer nightly or stable build",
+        group: CommandGroup::Setup,
+    },
+    CommandSpec {
+        name: "upgrade",
+        usage: "upgrade [chan]",
+        summary: "Update the Crackle binary (nightly or stable)",
+        group: CommandGroup::Setup,
+    },
+    CommandSpec {
+        name: "install",
+        usage: "install PKG...",
+        summary: "Add home-manager packages and activate",
+        group: CommandGroup::Packages,
+    },
+    CommandSpec {
+        name: "remove",
+        usage: "remove PKG...",
+        summary: "Remove home-manager packages and activate",
+        group: CommandGroup::Packages,
+    },
+    CommandSpec {
+        name: "list",
+        usage: "list",
+        summary: "List installed home-manager packages",
+        group: CommandGroup::Packages,
+    },
+    CommandSpec {
+        name: "clean",
+        usage: "clean",
+        summary: "Garbage-collect Nix and clean Crackle state",
+        group: CommandGroup::Packages,
+    },
+    CommandSpec {
+        name: "crack",
+        usage: "crack PKG",
+        summary: "Download a package and extract it under ~/packages",
+        group: CommandGroup::Touch,
+    },
+    CommandSpec {
+        name: "click",
+        usage: "click PKG...",
+        summary: "Build a Click package",
+        group: CommandGroup::Touch,
+    },
+    CommandSpec {
+        name: "bump-version",
+        usage: "bump-version PKG...",
+        summary: "Update a Click manifest version from apt",
+        group: CommandGroup::Touch,
+    },
+    CommandSpec {
+        name: "sudo",
+        usage: "sudo BIN...",
+        summary: "Link binaries for `sudo -i`",
+        group: CommandGroup::Touch,
+    },
+    CommandSpec {
+        name: "sudok",
+        usage: "sudok BIN...",
+        summary: "Remove those links",
+        group: CommandGroup::Touch,
+    },
+    CommandSpec {
+        name: "debug",
+        usage: "debug",
+        summary: "Print paths and configuration",
+        group: CommandGroup::Maintenance,
+    },
+    CommandSpec {
+        name: "nuke",
+        usage: "nuke",
+        summary: "Remove Crackle, Nix, and home-manager state",
+        group: CommandGroup::Maintenance,
+    },
+    CommandSpec {
+        name: "help",
+        usage: "help",
+        summary: "Show this help",
+        group: CommandGroup::Maintenance,
+    },
+    CommandSpec {
+        name: "migrate",
+        usage: "migrate",
+        summary: "Replace legacy Crackle with the Rust build",
+        group: CommandGroup::Migration,
+    },
+    CommandSpec {
+        name: "rollback",
+        usage: "rollback [ID]",
+        summary: "Restore a migration backup",
+        group: CommandGroup::Migration,
+    },
 ];
 
 fn main() {
@@ -195,10 +331,20 @@ fn dispatch() -> io::Result<()> {
         .and_then(|value| value.to_str())
         .unwrap_or("help");
     let values = args.get(1..).unwrap_or(&[]);
+    if command == "-h" || command == "--help" {
+        return show_help();
+    }
+    if command == "-V" || command == "--version" {
+        return version();
+    }
     match command {
         "help" => show_help(),
         "debug" => debug(),
         "setup" => setup(),
+        "version" => version(),
+        "check-update" => check_update(values),
+        "upgrade" => upgrade(values),
+        "__upgrade" => upgrade_install(),
         "migrate" => migrate(),
         "rollback" => rollback(values.first().and_then(|value| value.to_str())),
         "clean" => clean(),
@@ -428,33 +574,94 @@ pub(crate) fn curl_command() -> io::Result<Command> {
 /// Download with a working curl, falling back to wget. Used for the Nix
 /// installer, repository configuration, signing keys, and migration assets.
 pub(crate) fn download_file(url: &str, destination: &Path) -> io::Result<()> {
-    if let Ok(mut command) = curl_command() {
-        let status = command
+    if !url.starts_with("https://") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "downloads require an HTTPS URL",
+        ));
+    }
+    let curl_error = match curl_command() {
+        Ok(mut curl) => match curl
             .args([
                 "--fail",
                 "--location",
                 "--silent",
                 "--show-error",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--connect-timeout",
+                "15",
+                "--max-time",
+                "60",
                 url,
                 "--output",
             ])
             .arg(destination)
-            .status();
-        if status.is_ok_and(|status| status.success()) {
-            return Ok(());
-        }
-    }
+            .status()
+        {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => format!("curl exited with {status}"),
+            Err(error) => format!("could not run curl: {error}"),
+        },
+        Err(error) => format!("curl unavailable: {error}"),
+    };
+    remove_file_if_exists(destination).map_err(|error| {
+        io::Error::other(format!(
+            "could not remove incomplete download {}: {error}",
+            destination.display()
+        ))
+    })?;
     if available("wget") {
-        let status = command("wget")
-            .args(["-q", "-O"])
+        let result = command("wget")
+            .args(["--https-only", "--timeout=60", "--tries=1", "-q", "-O"])
             .arg(destination)
             .arg(url)
-            .status()?;
-        if status.success() {
-            return Ok(());
+            .status();
+        match result {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => {
+                return match remove_file_if_exists(destination) {
+                    Ok(()) => Err(io::Error::other(format!(
+                        "could not download {url}: wget exited with {status}"
+                    ))),
+                    Err(error) => Err(io::Error::other(format!(
+                        "wget exited with {status}; could not remove partial download {}: {error}",
+                        destination.display()
+                    ))),
+                };
+            }
+            Err(error) => {
+                return match remove_file_if_exists(destination) {
+                    Ok(()) => Err(io::Error::other(format!(
+                        "could not download {url}: could not run wget: {error}"
+                    ))),
+                    Err(cleanup_error) => Err(io::Error::other(format!(
+                        "could not run wget: {error}; could not remove partial download {}: {cleanup_error}",
+                        destination.display()
+                    ))),
+                };
+            }
         }
     }
-    Err(io::Error::other(format!("could not download {url}")))
+    Err(io::Error::other(format!(
+        "could not download {url}: {curl_error}; wget is unavailable"
+    )))
+}
+
+fn remove_file_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+fn remove_dir_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 pub(crate) fn command(program: &str) -> Command {
@@ -482,35 +689,620 @@ fn ensure_not_root() -> io::Result<()> {
     }
 }
 
-fn help_text() -> String {
-    let mut text = String::from("available commands:\n");
-    for command in SUBCOMMANDS {
-        let line = match *command {
-            "migrate" => {
-                "  crackle migrate       download and install the verified ARM64 Rust release"
-                    .to_owned()
-            }
-            "rollback" => {
-                "  crackle rollback [ID] restore the most recent (or named) migration backup"
-                    .to_owned()
-            }
-            "sudo" => "  crackle sudo $BIN".to_owned(),
-            "sudok" => "  crackle sudok $BIN".to_owned(),
-            "install" => "  crackle install $PKG...".to_owned(),
-            "remove" => "  crackle remove $PKG...".to_owned(),
-            "crack" => "  crackle crack $PKG".to_owned(),
-            "click" => "  crackle click $PKG...".to_owned(),
-            "bump-version" => "  crackle bump-version $PKG...".to_owned(),
-            other => format!("  crackle {other}"),
-        };
-        text.push_str(&line);
-        text.push('\n');
+fn short_commit() -> String {
+    if CRACKLE_COMMIT == "unknown" {
+        return "unknown".to_owned();
     }
+    CRACKLE_COMMIT.chars().take(7).collect()
+}
+
+fn help_text() -> String {
+    let width = COMMANDS
+        .iter()
+        .map(|command| command.usage.len())
+        .max()
+        .unwrap_or(0);
+    let mut text = format!(
+        "crackle {} ({}, {}) - Nix home-manager on Ubuntu Touch\n\nUsage: crackle <command> [arguments]\n",
+        CRACKLE_VERSION,
+        CRACKLE_CHANNEL,
+        short_commit()
+    );
+    for group in [
+        CommandGroup::Setup,
+        CommandGroup::Packages,
+        CommandGroup::Touch,
+        CommandGroup::Maintenance,
+        CommandGroup::Migration,
+    ] {
+        text.push('\n');
+        text.push_str(group.title());
+        text.push('\n');
+        for command in COMMANDS.iter().filter(|command| command.group == group) {
+            text.push_str(&format!(
+                "  {:<width$}  {}\n",
+                command.usage,
+                command.summary,
+                width = width
+            ));
+        }
+    }
+    text.push_str(
+        "\n`update` refreshes Nix channels; `upgrade` updates the Crackle binary itself; `check-update` only reports.\n\
+         Installed helpers (run directly): arch_triplet, desktop_trunc, _crackleopts, nix-manager, osvariant, remount, rorw, rwnix\n",
+    );
     text
 }
 
 fn show_help() -> io::Result<()> {
     print!("{}", help_text());
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Channel {
+    Nightly,
+    Stable,
+}
+
+impl Channel {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Nightly => "nightly",
+            Self::Stable => "stable",
+        }
+    }
+
+    fn base_url(self) -> &'static str {
+        match self {
+            Self::Nightly => RELEASE_BASE_NIGHTLY,
+            Self::Stable => RELEASE_BASE_STABLE,
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "nightly" => Some(Self::Nightly),
+            "stable" => Some(Self::Stable),
+            _ => None,
+        }
+    }
+}
+
+fn installed_channel() -> Option<Channel> {
+    Channel::parse(CRACKLE_CHANNEL)
+}
+
+fn layout_name(layout: InstallLayout) -> &'static str {
+    if layout.is_side_by_side() {
+        "side-by-side"
+    } else {
+        "standard"
+    }
+}
+
+fn short(value: &str) -> String {
+    value.chars().take(7).collect()
+}
+
+fn version() -> io::Result<()> {
+    println!(
+        "crackle {} ({}, {})",
+        CRACKLE_VERSION,
+        CRACKLE_CHANNEL,
+        short_commit()
+    );
+    println!("commit {}  built {}", CRACKLE_COMMIT, CRACKLE_BUILT);
+    println!("target {}", CRACKLE_TARGET);
+    Ok(())
+}
+
+struct ReleaseMetadata {
+    channel: String,
+    version: String,
+    tag: String,
+    commit: String,
+    built: String,
+}
+
+fn parse_release_metadata(text: &str) -> Option<ReleaseMetadata> {
+    if text.len() > 4096 || text.lines().count() > 9 {
+        return None;
+    }
+    let mut channel = None;
+    let mut version = None;
+    let mut tag = None;
+    let mut commit = None;
+    let mut built = None;
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (key, value) = line.split_once('=')?;
+        let value = value.trim().to_owned();
+        let destination = match key.trim() {
+            "channel" => Some(&mut channel),
+            "version" => Some(&mut version),
+            "tag" => Some(&mut tag),
+            "commit" => Some(&mut commit),
+            "built" => Some(&mut built),
+            _ => None,
+        };
+        if let Some(destination) = destination
+            && destination.replace(value).is_some()
+        {
+            return None;
+        }
+    }
+    let channel = channel?;
+    let version = version?;
+    let tag = tag?;
+    let commit = commit?;
+    let built = built?;
+    if !matches!(channel.as_str(), "nightly" | "stable")
+        || version.is_empty()
+        || tag.is_empty()
+        || commit.len() != 40
+        || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || built.is_empty()
+        || (channel == "stable" && parse_version_segments(&version).is_none())
+        || (channel == "stable"
+            && tag != version
+            && tag.strip_prefix('v') != Some(version.as_str()))
+        || (channel == "nightly" && tag != "nightly")
+    {
+        return None;
+    }
+    Some(ReleaseMetadata {
+        channel,
+        version,
+        tag,
+        commit,
+        built,
+    })
+}
+
+fn parse_version_segments(version: &str) -> Option<Vec<u64>> {
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let core = version.split(['-', '+']).next()?;
+    if core.is_empty() {
+        return None;
+    }
+    let mut segments = Vec::new();
+    for part in core.split('.') {
+        if part.is_empty() {
+            return None;
+        }
+        if !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        segments.push(part.parse().ok()?);
+    }
+    Some(segments)
+}
+
+fn compare_versions(left: &[u64], right: &[u64]) -> std::cmp::Ordering {
+    for index in 0..left.len().max(right.len()) {
+        let left = left.get(index).copied().unwrap_or(0);
+        let right = right.get(index).copied().unwrap_or(0);
+        match left.cmp(&right) {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateDecision {
+    Current,
+    UpdateAvailable,
+    ChannelMismatch,
+    Unknown,
+}
+
+fn decide_update(
+    channel: Channel,
+    installed_channel: &str,
+    installed_version: &str,
+    installed_commit: &str,
+    remote: &ReleaseMetadata,
+) -> UpdateDecision {
+    if installed_channel != channel.name() {
+        return UpdateDecision::ChannelMismatch;
+    }
+    if installed_commit == "unknown" {
+        return UpdateDecision::Unknown;
+    }
+    match channel {
+        Channel::Nightly => {
+            if remote.commit.eq_ignore_ascii_case(installed_commit) {
+                UpdateDecision::Current
+            } else {
+                UpdateDecision::UpdateAvailable
+            }
+        }
+        Channel::Stable => {
+            let Some(local) = parse_version_segments(installed_version) else {
+                return UpdateDecision::Unknown;
+            };
+            let Some(remote_version) = parse_version_segments(&remote.version) else {
+                return UpdateDecision::Unknown;
+            };
+            if compare_versions(&remote_version, &local) == std::cmp::Ordering::Greater {
+                UpdateDecision::UpdateAvailable
+            } else {
+                UpdateDecision::Current
+            }
+        }
+    }
+}
+
+fn installed_label() -> String {
+    match installed_channel() {
+        Some(Channel::Stable) => CRACKLE_VERSION.to_owned(),
+        Some(Channel::Nightly) => short_commit(),
+        None => format!("{} ({})", CRACKLE_VERSION, short_commit()),
+    }
+}
+
+fn remote_label(channel: Channel, remote: &ReleaseMetadata) -> String {
+    match channel {
+        Channel::Stable => {
+            if remote.tag.is_empty() {
+                remote.version.clone()
+            } else {
+                format!("{} ({})", remote.version, remote.tag)
+            }
+        }
+        Channel::Nightly => short(&remote.commit),
+    }
+}
+
+fn resolve_channel_arg(value: Option<&str>) -> Result<Channel, String> {
+    let name = match value {
+        Some(value) => value.to_owned(),
+        None => match env::var_os("CRACKLE_CHANNEL") {
+            Some(value) => value
+                .into_string()
+                .map_err(|_| "CRACKLE_CHANNEL is not valid UTF-8".to_owned())?,
+            None => CRACKLE_CHANNEL.to_owned(),
+        },
+    };
+    match name.as_str() {
+        "nightly" => Ok(Channel::Nightly),
+        "stable" => Ok(Channel::Stable),
+        "dev" => Ok(Channel::Nightly),
+        other => Err(format!(
+            "unknown channel '{other}' (expected nightly or stable)"
+        )),
+    }
+}
+
+fn command_channel(values: &[OsString]) -> Result<Channel, String> {
+    if values.len() > 1 {
+        return Err("expected at most one channel argument".to_owned());
+    }
+    let value = match values.first() {
+        Some(value) => Some(
+            value
+                .to_str()
+                .ok_or_else(|| "channel argument is not valid UTF-8".to_owned())?,
+        ),
+        None => None,
+    };
+    resolve_channel_arg(value)
+}
+
+fn release_metadata_url(channel: Channel) -> String {
+    format!("{}/version.txt", channel.base_url())
+}
+
+fn fetch_release_metadata(channel: Channel, layout: InstallLayout) -> io::Result<ReleaseMetadata> {
+    let directory = state_dir(layout)?.join(format!("update-check-{}", std::process::id()));
+    fs::create_dir_all(&directory)?;
+    let path = directory.join("version.txt");
+    let result = download_file(&release_metadata_url(channel), &path).and_then(|()| {
+        if fs::metadata(&path)?.len() > 4096 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "version.txt is too large",
+            ));
+        }
+        let text = fs::read_to_string(&path)?;
+        let metadata = parse_release_metadata(&text).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "version.txt is malformed")
+        })?;
+        if metadata.channel != channel.name() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "version.txt channel does not match the requested release",
+            ));
+        }
+        Ok(metadata)
+    });
+    match (result, remove_dir_if_exists(&directory)) {
+        (Ok(metadata), Ok(())) => Ok(metadata),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(io::Error::other(format!(
+            "{error}; could not remove temporary metadata directory: {cleanup_error}"
+        ))),
+    }
+}
+
+fn exit_with(code: i32) -> ! {
+    let _ = io::stdout().flush();
+    std::process::exit(code)
+}
+
+fn check_update(values: &[OsString]) -> io::Result<()> {
+    let channel = match command_channel(values) {
+        Ok(channel) => channel,
+        Err(error) => {
+            eprintln!("Crackle: {error}");
+            exit_with(2)
+        }
+    };
+    let layout = match resolve_layout(&invoked_name()) {
+        Ok(layout) => layout,
+        Err(error) => {
+            eprintln!("Crackle: could not check updates: {error}");
+            exit_with(11)
+        }
+    };
+    let remote = match fetch_release_metadata(channel, layout) {
+        Ok(remote) => remote,
+        Err(error) => {
+            eprintln!("Crackle: could not check updates: {error}");
+            exit_with(11)
+        }
+    };
+    println!("Channel: {}", channel.name());
+    println!(
+        "Installed: {} (commit {}, built {})",
+        installed_label(),
+        short(CRACKLE_COMMIT),
+        CRACKLE_BUILT
+    );
+    println!(
+        "Latest:    {} (commit {}, built {})",
+        remote_label(channel, &remote),
+        short(&remote.commit),
+        remote.built
+    );
+    let code = match decide_update(
+        channel,
+        CRACKLE_CHANNEL,
+        CRACKLE_VERSION,
+        CRACKLE_COMMIT,
+        &remote,
+    ) {
+        UpdateDecision::Current => {
+            println!("Crackle {} is current.", installed_label());
+            0
+        }
+        UpdateDecision::UpdateAvailable => {
+            println!("Update available. Run `crackle upgrade`.");
+            10
+        }
+        UpdateDecision::ChannelMismatch => {
+            println!(
+                "Installed channel is {}; requested {}. Run `crackle upgrade {}` to switch.",
+                CRACKLE_CHANNEL,
+                channel.name(),
+                channel.name()
+            );
+            12
+        }
+        UpdateDecision::Unknown => {
+            eprintln!("Crackle: could not determine the installed version.");
+            11
+        }
+    };
+    exit_with(code)
+}
+
+fn expected_digest(path: &Path, asset: &str) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(digest) = fields.next() else {
+            continue;
+        };
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        if name.trim_start_matches([' ', '*']) == asset {
+            return Some(digest.to_owned());
+        }
+    }
+    None
+}
+
+fn upgrade(values: &[OsString]) -> io::Result<()> {
+    let channel = match command_channel(values) {
+        Ok(channel) => channel,
+        Err(error) => {
+            eprintln!("Crackle: {error}");
+            exit_with(2)
+        }
+    };
+    if let Err(error) = perform_upgrade(channel) {
+        eprintln!("Crackle: upgrade failed: {error}");
+        exit_with(11);
+    }
+    Ok(())
+}
+
+fn perform_upgrade(channel: Channel) -> io::Result<()> {
+    let layout = resolve_layout(&invoked_name())?;
+    let remote = match fetch_release_metadata(channel, layout) {
+        Ok(remote) => remote,
+        Err(error) => {
+            return Err(io::Error::other(format!(
+                "could not fetch release metadata: {error}"
+            )));
+        }
+    };
+    let switching = CRACKLE_CHANNEL != channel.name();
+    let forced = env::var("CRACKLE_UPGRADE_FORCE").ok().as_deref() == Some("1");
+    if !switching && !forced {
+        match decide_update(
+            channel,
+            CRACKLE_CHANNEL,
+            CRACKLE_VERSION,
+            CRACKLE_COMMIT,
+            &remote,
+        ) {
+            UpdateDecision::Current => {
+                println!(
+                    "crackle {} is already current ({}).",
+                    installed_label(),
+                    remote_label(channel, &remote)
+                );
+                return Ok(());
+            }
+            UpdateDecision::UpdateAvailable => {}
+            UpdateDecision::ChannelMismatch => {}
+            UpdateDecision::Unknown => {
+                return Err(io::Error::other(
+                    "could not determine the installed version; set CRACKLE_UPGRADE_FORCE=1 to reinstall",
+                ));
+            }
+        }
+    }
+
+    let base = channel.base_url();
+    let bin = prefix()?.join("bin");
+    fs::create_dir_all(&bin)?;
+    let directory = state_dir(layout)?.join(format!("upgrade-{}", std::process::id()));
+    fs::create_dir_all(&directory)?;
+    let binary = directory.join(RELEASE_BINARY);
+    let sums = directory.join("SHA256SUMS");
+    let staged = bin.join(format!(".crackle-upgrade-{}", std::process::id()));
+    let result = (|| -> io::Result<()> {
+        download_file(&format!("{base}/{RELEASE_BINARY}"), &binary)?;
+        download_file(&format!("{base}/SHA256SUMS"), &sums)?;
+        let expected = expected_digest(&sums, RELEASE_BINARY).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "release checksum is missing")
+        })?;
+        let actual = migration::checksum(&binary)?;
+        if !actual.eq_ignore_ascii_case(&expected) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "downloaded binary failed SHA-256 verification",
+            ));
+        }
+
+        fs::copy(&binary, &staged)?;
+        set_executable(&staged)?;
+        let mut command = Command::new(&staged);
+        command
+            .arg("__upgrade")
+            .env("PATH", effective_path())
+            .env("CRACKLE_INSTALL_LAYOUT", layout_name(layout));
+        let status = run_command(&mut command);
+        match status {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(io::Error::other(format!(
+                "new binary failed to install: {status}"
+            ))),
+            Err(error) => Err(error),
+        }
+    })();
+    let staged_cleanup = remove_file_if_exists(&staged);
+    let directory_cleanup = remove_dir_if_exists(&directory);
+    let cleanup = match (staged_cleanup, directory_cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(first), Err(second)) => Err(io::Error::other(format!("{first}; {second}"))),
+    };
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => {}
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(()), Err(error)) => return Err(error),
+        (Err(error), Err(cleanup_error)) => {
+            return Err(io::Error::other(format!(
+                "{error}; upgrade cleanup failed: {cleanup_error}"
+            )));
+        }
+    }
+    println!(
+        "Upgraded to {} {} (commit {}).",
+        channel.name(),
+        remote.version,
+        short(&remote.commit)
+    );
+    println!("Run `crackle setup` if Nix/home-manager still needs configuring.");
+    Ok(())
+}
+
+fn upgrade_install() -> io::Result<()> {
+    let layout = resolve_layout(&invoked_name())?;
+    let prefix = prefix()?;
+    let executable = env::current_exe()?;
+    let completion = if layout.is_side_by_side() {
+        None
+    } else {
+        Some(completion_file()?)
+    };
+    upgrade_binaries_at(layout, &prefix, &executable, completion.as_deref())
+}
+
+fn is_native_executable(path: &Path) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if file.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    &magic == b"\x7fELF" || &magic[..2] == b"MZ"
+}
+
+fn upgrade_binaries_at(
+    layout: InstallLayout,
+    prefix: &Path,
+    executable: &Path,
+    completion: Option<&Path>,
+) -> io::Result<()> {
+    let bin = prefix.join("bin");
+    fs::create_dir_all(&bin)?;
+    match layout {
+        InstallLayout::Standard => {
+            for name in COMMAND_NAMES {
+                install_binary_as(&bin, name, executable)?;
+            }
+            if let Some(completion) = completion {
+                write_completion(completion)?;
+            }
+        }
+        InstallLayout::SideBySide => {
+            install_binary_as(&bin, layout.main_name(), executable)?;
+            for name in COMMAND_NAMES
+                .iter()
+                .copied()
+                .filter(|name| *name != "crackle")
+            {
+                let target = bin.join(name);
+                match fs::symlink_metadata(&target) {
+                    Ok(metadata)
+                        if (metadata.is_file() || metadata.file_type().is_symlink())
+                            && is_native_executable(&target) =>
+                    {
+                        install_binary_as(&bin, name, executable)?;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        install_binary_as(&bin, name, executable)?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -616,7 +1408,14 @@ fn helper(name: &str, args: &[OsString]) -> io::Result<()> {
             }
         }
         "desktop_trunc" => desktop_trunc(args)?,
-        "_crackleopts" => println!("{}", SUBCOMMANDS.join(" ")),
+        "_crackleopts" => println!(
+            "{}",
+            COMMANDS
+                .iter()
+                .map(|command| command.name)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
         "remount" => remount_root()?,
         _ => show_help()?,
     }
@@ -719,6 +1518,11 @@ fn install_binary_as(bin: &Path, name: &str, executable: &Path) -> io::Result<()
     fs::rename(temporary, target)
 }
 
+fn write_completion(completion: &Path) -> io::Result<()> {
+    let content = include_str!("../share/bash-completion/completions/crackle");
+    atomic_write(completion, content.as_bytes())
+}
+
 fn install_binaries(layout: InstallLayout) -> io::Result<()> {
     let executable = env::current_exe()?;
     let completion = if layout.is_side_by_side() {
@@ -743,11 +1547,7 @@ fn install_binaries_at(
                 install_binary_as(&bin, name, executable)?;
             }
             if let Some(completion) = completion {
-                if let Some(parent) = completion.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let content = include_str!("../share/bash-completion/completions/crackle");
-                atomic_write(completion, content.as_bytes())?;
+                write_completion(completion)?;
             }
             println!("Installed Crackle commands in {}.", bin.display());
         }

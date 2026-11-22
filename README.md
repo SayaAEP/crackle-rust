@@ -92,23 +92,41 @@ links it created.
 
 ```text
 crackle setup
+crackle update
+crackle version
+crackle check-update [nightly|stable]
+crackle upgrade [nightly|stable]
+crackle install PACKAGE...
+crackle remove PACKAGE...
+crackle list
+crackle clean
 crackle migrate
 crackle rollback [ID]
 crackle debug
 crackle crack PACKAGE
-crackle sudo BINARY
-crackle sudok BINARY
 crackle click PACKAGE...
 crackle bump-version PACKAGE
-crackle clean
-crackle install PACKAGE...
-crackle remove PACKAGE...
-crackle update
-crackle list
+crackle sudo BINARY...
+crackle sudok BINARY...
 crackle nuke
 crackle help
 ```
 
+- `version`, `--version`, and `-V` print the embedded version, release channel,
+  commit, build time, and target. Local builds identify themselves as `dev`.
+- `check-update [nightly|stable]` checks release metadata only and never installs
+  anything. The optional channel overrides `CRACKLE_CHANNEL`, which overrides
+  the embedded channel; a local `dev` build defaults to checking nightly.
+  Exit codes are `0` current, `10` update available, `11` check failed or
+  identity unknown, `12` requested channel differs from the installed channel,
+  and `2` invalid arguments. `CRACKLE_CHANNEL=stable` checks stable releases.
+- `upgrade [nightly|stable]` updates only the Crackle executable and its owned
+  helper binaries; it does not update Nix packages. It can switch channels,
+  verifies the downloaded binary against that release's `SHA256SUMS`, and
+  reinstalls when `CRACKLE_UPGRADE_FORCE=1` is set. Its exit codes are `0`
+  updated/switched/already current, `11` fetch, verification, or install
+  failure, and `2` invalid arguments. Afterward, run `crackle setup` if
+  Nix/home-manager still needs configuring.
 - `setup` configures Nix home-manager and installs the Rust command aliases; when
   run from `~/.local/bin/crackle`, it also updates the Nix channels and switches
   home-manager, matching the installed legacy setup workflow. It never migrates
@@ -117,10 +135,12 @@ crackle help
   checksum-verified download. `rollback` restores its saved state.
 - `install` and `remove` edit the home-manager package list, build the
   configuration, and activate it. Configuration is backed up before editing.
-- `update` refreshes the Nix channels and activates home-manager; `clean` runs
-  Nix garbage collection and then removes Crackle's own workspace, downloaded
-  repository configuration, and dangling Crackle-created links. Pre-existing
-  Apt cache/state/config directories are left untouched.
+- `update` only refreshes Nix channels and activates home-manager; it does not
+  update the Crackle binary. Use `check-update` to check the binary release and
+  `upgrade` to install it. `clean` runs Nix garbage collection and then removes
+  Crackle's own workspace, downloaded repository configuration, and dangling
+  Crackle-created links. Pre-existing Apt cache/state/config directories are
+  left untouched.
 - `crack PACKAGE` downloads packages into the user's Apt workspace and extracts
   them under `~/packages/PACKAGE`.
 - `click PACKAGE...` builds a Click package using the system's Click tooling.

@@ -129,7 +129,7 @@ fn release_asset(url: &str, destination: &Path) -> io::Result<()> {
         .map_err(|error| io::Error::other(format!("download failed: {url}: {error}")))
 }
 
-fn checksum(path: &Path) -> io::Result<String> {
+pub(crate) fn checksum(path: &Path) -> io::Result<String> {
     let output = Command::new("sha256sum").arg(path).output()?;
     if !output.status.success() {
         return Err(io::Error::other("sha256sum failed"));

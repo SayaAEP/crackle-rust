@@ -41,15 +41,42 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
+          commit=$(git rev-parse HEAD)
+          built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          package_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          case "$GITHUB_REF" in
+            refs/tags/*)
+              channel=stable
+              version=${GITHUB_REF_NAME#v}
+              tag=$GITHUB_REF_NAME
+              ;;
+            refs/heads/rust)
+              channel=nightly
+              version="nightly-${commit:0:7}"
+              tag=nightly
+              ;;
+            *)
+              channel=dev
+              version=$package_version
+              tag=dev
+              ;;
+          esac
+          CRACKLE_VERSION=$version \
+          CRACKLE_CHANNEL=$channel \
+          CRACKLE_COMMIT=$commit \
+          CRACKLE_BUILT=$built \
           cargo build --locked --release --target aarch64-unknown-linux-gnu
           cp target/aarch64-unknown-linux-gnu/release/crackle crackle-aarch64-unknown-linux-gnu
           sha256sum crackle-aarch64-unknown-linux-gnu > SHA256SUMS
+          printf 'channel=%s\nversion=%s\ntag=%s\ncommit=%s\nbuilt=%s\n' \
+            "$channel" "$version" "$tag" "$commit" "$built" > version.txt
       - uses: actions/upload-artifact@v4
         with:
           name: crackle-aarch64-unknown-linux-gnu
           path: |
             crackle-aarch64-unknown-linux-gnu
             SHA256SUMS
+            version.txt
 
   stable-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
@@ -81,6 +108,7 @@ jobs:
           files: |
             release-artifacts/crackle-aarch64-unknown-linux-gnu
             release-artifacts/SHA256SUMS
+            release-artifacts/version.txt
 
   nightly-release:
     if: >-
@@ -130,4 +158,5 @@ jobs:
           files: |
             release-artifacts/crackle-aarch64-unknown-linux-gnu
             release-artifacts/SHA256SUMS
+            release-artifacts/version.txt
             lib/upgradefunc
