@@ -32,8 +32,16 @@ impl Fixture {
             stubs,
             log,
         };
-        fixture.stub("id", "echo 1000");
+        fixture.prefix_stub("id", "echo 1000");
         fixture
+    }
+
+    fn prefix_stub(&self, name: &str, body: &str) {
+        let directory = self.root.join("prefix/bin");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     fn stub(&self, name: &str, body: &str) {
@@ -107,7 +115,7 @@ fn stderr(output: &Output) -> String {
 #[test]
 fn root_guard_applies_to_crackle_but_not_helpers() {
     let fixture = Fixture::new("root");
-    fixture.stub("id", "echo 0");
+    fixture.prefix_stub("id", "echo 0");
 
     let output = fixture.run(&["help"]);
     assert_eq!(output.status.code(), Some(100));
@@ -127,7 +135,7 @@ fn help_and_debug_run_with_an_isolated_environment() {
     let help = stdout(&output);
     assert!(help.contains("Usage: crackle <command> [arguments]"));
     assert!(help.contains("Setup and updates"));
-    assert!(help.contains("check-update only reports"));
+    assert!(help.contains("`check-update` only reports"));
     assert!(!help.contains('\t'));
 
     let output = fixture.run(&["debug"]);
