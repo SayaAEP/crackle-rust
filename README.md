@@ -127,8 +127,9 @@ crackle help
 - `remount` is an explicit standalone helper. It is never invoked by setup or
   migration, and it restores the original root mount mode when it finishes.
 - `nuke` removes Nix and home-manager data and is destructive; use it only when
-  that is intended. It continues past individual failures and leaves migration
-  backups and pre-existing Apt state in place.
+  that is intended. In an interactive terminal it asks for `[y/N]` confirmation;
+  set `CRACKLE_YES=1` to skip the prompt in scripts. It continues past individual
+  failures and leaves migration backups and pre-existing Apt state in place.
 
 ## Building from source
 

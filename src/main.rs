@@ -194,7 +194,7 @@ fn dispatch() -> io::Result<()> {
         .first()
         .and_then(|value| value.to_str())
         .unwrap_or("help");
-    let values = &args[1..];
+    let values = args.get(1..).unwrap_or(&[]);
     match command {
         "help" => show_help(),
         "debug" => debug(),
@@ -1064,7 +1064,13 @@ struct AptWorkspace {
 
 impl AptWorkspace {
     fn create(layout: InstallLayout) -> io::Result<Self> {
-        let unique = format!("crackle-apt-{}", std::process::id());
+        // PIDs get reused; mix in a monotonic timestamp so two runs can
+        // never collide on the same workspace directory name.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let unique = format!("crackle-apt-{}-{nanos}", std::process::id());
         let cache = apt_path(layout, "APTCACHE", "XDG_CACHE_HOME", ".cache", "apt")?;
         let state = apt_path(layout, "APTSTATE", "XDG_STATE_HOME", ".local/state", "apt")?;
         let dpkg = apt_path(
@@ -1732,7 +1738,10 @@ fn crack(args: &[OsString]) -> io::Result<()> {
     if !run_command(&mut download)?.success() {
         return Err(io::Error::other("apt-get download-only install failed"));
     }
-    let package_name = args[0].to_string_lossy();
+    let package_name = args
+        .first()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_default();
     let destination = home()?.join("packages").join(package_name.as_ref());
     fs::create_dir_all(&destination)?;
     for path in downloaded_debs(&apt.cache.join("archives"))? {
@@ -2321,6 +2330,26 @@ fn remove_side_by_side_state(layout: InstallLayout, prefix: &Path) -> io::Result
     Ok(())
 }
 
+fn confirm_nuke() -> io::Result<()> {
+    use std::io::IsTerminal;
+    if env::var("CRACKLE_YES").ok().as_deref() == Some("1") {
+        return Ok(());
+    }
+    if !io::stdin().is_terminal() {
+        // Non-interactive (scripts, CI): behave exactly like before, no prompt.
+        return Ok(());
+    }
+    print!("This removes Crackle, Nix, and all home-manager state. Continue? [y/N] ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    if answer.trim().eq_ignore_ascii_case("y") {
+        Ok(())
+    } else {
+        Err(io::Error::new(io::ErrorKind::Interrupted, "nuke cancelled"))
+    }
+}
+
 fn nuke() -> io::Result<()> {
     ensure_not_root()?;
     let layout = resolve_layout(&invoked_name())?;
@@ -2328,6 +2357,7 @@ fn nuke() -> io::Result<()> {
     let legacy = legacy_install_present(&prefix);
     let forced = env::var("CRACKLE_FORCE").ok().as_deref() == Some("1");
     nuke_allowed(layout, legacy, forced)?;
+    confirm_nuke()?;
 
     println!("Removing Crackle, Nix, and home-manager state.");
     for channel in ["home-manager", "nixpkgs"] {
