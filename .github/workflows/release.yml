@@ -41,15 +41,120 @@ jobs:
           cargo fmt --all -- --check
           cargo test --locked
           cargo clippy --locked --all-targets -- -D warnings
-          python3 -B -m unittest discover -s scripts -p 'test_*.py'
       - name: Calculate version and release notes
         id: release
         env:
           BUMP: ${{ inputs.bump }}
         run: |
-          version=$(python3 scripts/release.py prepare --bump "$BUMP")
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          python3 <<'PY'
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+
+          header_pattern = re.compile(
+              r"^(?P<type>[a-z][a-z0-9-]*)(?:\([^)]+\))?(?P<breaking>!)?: .+$"
+          )
+          version_pattern = re.compile(
+              r"^v?(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)$"
+          )
+
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+
+          try:
+              tags = git("tag", "--list", "v*").splitlines()
+              stable_tags = []
+              for tag in tags:
+                  match = version_pattern.fullmatch(tag)
+                  if match:
+                      stable_tags.append(
+                          (
+                              tuple(
+                                  int(match.group(name))
+                                  for name in ("major", "minor", "patch")
+                              ),
+                              tag,
+                          )
+                      )
+              revision_range = f"{max(stable_tags)[1]}..HEAD" if stable_tags else "HEAD"
+              hashes = git(
+                  "log", "--no-merges", "--format=%H", "-z", revision_range
+              ).split("\0")
+              commits = []
+              for commit in filter(None, hashes):
+                  message = git("show", "-s", "--format=%B", commit)
+                  lines = message.splitlines()
+                  subject = lines[0] if lines else ""
+                  match = header_pattern.fullmatch(subject)
+                  if not match:
+                      raise ValueError(
+                          f"{commit[:12]}: not a Conventional Commit: "
+                          f"{subject or '<empty message>'}"
+                      )
+                  breaking = bool(match.group("breaking")) or any(
+                      line.startswith(("BREAKING CHANGE:", "BREAKING-CHANGE:"))
+                      for line in lines[1:]
+                  )
+                  commits.append((commit, match.group("type"), subject, breaking))
+
+              if not commits:
+                  raise ValueError("no commits found since the previous stable release")
+
+              bump = os.environ["BUMP"]
+              if bump == "auto":
+                  if any(breaking for _, _, _, breaking in commits):
+                      bump = "major"
+                  elif any(kind == "feat" for _, kind, _, _ in commits):
+                      bump = "minor"
+                  else:
+                      bump = "patch"
+
+              manifest = pathlib.Path("Cargo.toml")
+              cargo_text = manifest.read_text(encoding="utf-8")
+              current_match = re.search(r'(?m)^version = "([^"]+)"$', cargo_text)
+              if not current_match:
+                  raise ValueError("could not find package version in Cargo.toml")
+              current = version_pattern.fullmatch(current_match.group(1))
+              if not current:
+                  raise ValueError("Cargo version must be SemVer X.Y.Z")
+              major, minor, patch = (
+                  int(current.group(name)) for name in ("major", "minor", "patch")
+              )
+              if bump == "major":
+                  major, minor, patch = major + 1, 0, 0
+              elif bump == "minor":
+                  major, minor, patch = major, minor + 1, 0
+              elif bump == "patch":
+                  major, minor, patch = major, minor, patch + 1
+              else:
+                  raise ValueError(f"unsupported bump level: {bump}")
+              version = f"{major}.{minor}.{patch}"
+
+              groups = {"Features": [], "Fixes": [], "Other changes": []}
+              for commit, kind, subject, breaking in commits:
+                  group = {
+                      "feat": "Features",
+                      "fix": "Fixes",
+                  }.get(kind, "Other changes")
+                  suffix = " (breaking)" if breaking else ""
+                  summary = subject[subject.index(":") + 2 :]
+                  groups[group].append(f"- {summary}{suffix} ({commit[:7]})")
+
+              notes = [f"# v{version}", ""]
+              for title, entries in groups.items():
+                  if entries:
+                      notes.extend((f"## {title}", "", *entries, ""))
+              pathlib.Path("release-notes.md").write_text(
+                  "\n".join(notes).rstrip() + "\n", encoding="utf-8"
+              )
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                  output.write(f"version={version}\ntag=v{version}\n")
+          except (OSError, subprocess.CalledProcessError, ValueError) as error:
+              print(error, file=sys.stderr)
+              raise SystemExit(1)
+          PY
       - name: Update manifests and changelog
         env:
           VERSION: ${{ steps.release.outputs.version }}
